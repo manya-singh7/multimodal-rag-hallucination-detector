@@ -18,6 +18,8 @@ def make_stub_image(path, text, color):
 def print_result(label, result):
     print(f"=== {label}: ANSWER ===")
     print(result["answer"])
+    print("\n=== SUPPORTING SENTENCE ===")
+    print(result.get("supporting_sentence", "N/A"))
     print("\n=== USED TEXT ===")
     for chunk in result["used_text"]:
         print(f"- ({chunk['source_doc']}) {chunk['text'][:80]}...")

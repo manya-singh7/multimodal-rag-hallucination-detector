@@ -21,6 +21,29 @@ def _build_prompt(query, text_chunks, images):
     return "\n\n".join(lines)
 
 
+def _find_supporting_sentence(answer, text_chunks):
+    """Pick the sentence from the retrieved text that overlaps most with the answer."""
+    if not text_chunks or not answer:
+        return "none"
+
+    answer_words = set(answer.lower().split())
+    best_sentence = "none"
+    best_overlap = 0
+
+    for chunk in text_chunks:
+        for sentence in chunk["text"].split(". "):
+            sentence = sentence.strip().rstrip(".")
+            if not sentence:
+                continue
+            sentence_words = set(sentence.lower().split())
+            overlap = len(answer_words & sentence_words)
+            if overlap > best_overlap:
+                best_overlap = overlap
+                best_sentence = sentence
+
+    return best_sentence if best_overlap > 0 else "none"
+
+
 def generate_answer(query, retrieved):
     text_chunks = retrieved.get("text_chunks") or []
     images = retrieved.get("images") or []
@@ -29,9 +52,11 @@ def generate_answer(query, retrieved):
     image_paths = [img["path"] for img in images]
 
     answer = call_vlm(prompt, images=image_paths or None)
+    supporting_sentence = _find_supporting_sentence(answer, text_chunks)
 
     return {
-        "answer": answer,
+        "answer": answer.strip(),
+        "supporting_sentence": supporting_sentence,
         "used_text": text_chunks,
         "used_images": images,
     }
