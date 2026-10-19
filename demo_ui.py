@@ -1,3 +1,5 @@
+
+import html
 import time
 import gradio as gr
 
@@ -5,203 +7,271 @@ try:
     from generator import generate_answer as _generate_answer_real
     HAS_REAL_GENERATOR = True
 except Exception:
+    _generate_answer_real = None
     HAS_REAL_GENERATOR = False
 
 
 def _generate_answer_stub(query: str, retrieved: dict) -> dict:
-    time.sleep(0.3)
-    text_chunks = retrieved.get("text_chunks") or []
-    images = retrieved.get("images") or []
+    """Offline fallback when the real model is unavailable."""
+    time.sleep(0.2)
+    chunks = retrieved.get("text_chunks") or []
+
+    if chunks:
+        answer = (
+            "The retrieved sample context says that RAG uses relevant "
+            "documents as context for generating answers. This is a "
+            "demonstration response, not a real model-generated answer."
+        )
+        supporting_sentence = chunks[0]["text"]
+    else:
+        answer = (
+            "I could not find relevant evidence. Add research PDFs and "
+            "process them before relying on this pipeline."
+        )
+        supporting_sentence = "none"
+
     return {
-        "answer": f"[stub answer] Response to '{query}' — swap in the real "
-        f"generate_answer() once generator.py/call_vlm.py are available.",
-        "supporting_sentence": text_chunks[0]["text"] if text_chunks else "none",
-        "used_text": text_chunks,
-        "used_images": images,
+        "answer": answer,
+        "supporting_sentence": supporting_sentence,
+        "used_text": chunks,
+        "used_images": retrieved.get("images") or [],
     }
 
 
 def generate_answer(query: str, retrieved: dict) -> dict:
+    """Use the real generator when available; otherwise use a labelled fallback."""
     if HAS_REAL_GENERATOR:
-        return _generate_answer_real(query, retrieved)
+        try:
+            return _generate_answer_real(query, retrieved)
+        except Exception as exc:
+            return {
+                "answer": (
+                    "The real generator could not run. Check the model "
+                    f"environment and call_vlm.py. Error: {exc}"
+                ),
+                "supporting_sentence": "none",
+                "used_text": retrieved.get("text_chunks") or [],
+                "used_images": retrieved.get("images") or [],
+            }
+
     return _generate_answer_stub(query, retrieved)
 
+
 def retrieve(query: str) -> dict:
-    """STUB — Person A's real retriever goes here."""
-    time.sleep(0.3)
+    """Connect the existing UI to retriever.py."""
+    from retriever import retrieve as retrieve_documents
+
+    output = retrieve_documents(query, top_k=3)
+    text_chunks = []
+    images = []
+
+    for item in output.get("results", []):
+        text_chunks.append({
+            "text": item.get("text", ""),
+            "source_doc": item.get("source", "unknown"),
+        })
+
+        image_path = item.get("image_path")
+        if image_path:
+            from pathlib import Path
+
+            if Path(image_path).exists():
+                images.append({
+                    "path": image_path,
+                    "caption": item.get("caption", ""),
+                    "source_doc": item.get("source", "unknown"),
+                })
+
     return {
-        "text_chunks": [
-            {"text": f"[stub] Retrieved passage 1 relevant to: '{query}'", "source_doc": "article_04.txt"},
-            {"text": f"[stub] Retrieved passage 2 relevant to: '{query}'", "source_doc": "article_11.txt"},
-        ],
-        "images": [
-            {"path": "test_assets/chart.png", "caption": "stub image 1", "source_doc": "article_04.txt"},
-            {"path": "test_assets/diagram.png", "caption": "stub image 2", "source_doc": "article_11.txt"},
-        ],
+        "text_chunks": text_chunks,
+        "images": images,
+        "is_sample_data": output.get("is_sample_data", False),
     }
 
 
 def check_hallucinations(answer: str, retrieved: dict) -> dict:
-    """STUB — Person C's real checker goes here."""
-    time.sleep(0.3)
-    claims = [
-        {"claim": "The first claim extracted from the answer.", "verdict": "supported",
-         "evidence": "Matches article_04.txt, passage 1."},
-        {"claim": "A second, riskier claim from the answer.", "verdict": "unsupported",
-         "evidence": "No retrieved source backs this."},
-        {"claim": "A third claim that's ambiguous.", "verdict": "unclear",
-         "evidence": "Partially supported by article_11.txt."},
-    ]
-    supported = sum(1 for c in claims if c["verdict"] == "supported")
-    overall_score = round(supported / len(claims), 2)
-    return {"claims": claims, "overall_score": overall_score}
+    """
+    Placeholder only. This does not genuinely verify claims.
+    Replace with the project's real claim-verification implementation.
+    """
+    return {
+        "claims": [{
+            "claim": "Automated claim verification is not implemented yet.",
+            "verdict": "unclear",
+            "evidence": (
+                "This is a placeholder. No real claim-level verification "
+                "has been performed."
+            ),
+        }],
+        "overall_score": None,
+        "status": "NOT VERIFIED",
+    }
 
-
-VERDICT_COLORS = {
-    "supported": "#1e7e34",
-    "unsupported": "#c0392b",
-    "unclear": "#b7791f",
-}
-VERDICT_BG = {
-    "supported": "#e6f4ea",
-    "unsupported": "#fdecea",
-    "unclear": "#fff6e0",
-}
-
-
-def score_badge(score: float) -> str:
-    if score >= 0.8:
-        emoji, label = "🟢", "High trust"
-    elif score >= 0.5:
-        emoji, label = "🟡", "Mixed"
-    else:
-        emoji, label = "🔴", "Low trust"
-    return (
-        f"<div style='font-size:1.1em;padding:10px 14px;border-radius:8px;"
-        f"background:#f2f2f2;display:inline-block;'>"
-        f"{emoji} <b>{label}</b> — overall score {score:.2f}</div>"
-    )
-
-
-def claims_html(claims: list) -> str:
-    rows = []
-    for c in claims:
-        color = VERDICT_COLORS.get(c["verdict"], "#333")
-        bg = VERDICT_BG.get(c["verdict"], "#eee")
-        rows.append(
-            f"<div style='margin:6px 0;padding:8px 12px;border-radius:6px;"
-            f"background:{bg};border-left:4px solid {color};'>"
-            f"<span style='color:{color};font-weight:600;text-transform:uppercase;"
-            f"font-size:0.75em;'>{c['verdict']}</span><br>"
-            f"<span>{c['claim']}</span><br>"
-            f"<span style='color:#555;font-size:0.85em;'>Evidence: {c['evidence']}</span>"
-            f"</div>"
-        )
-    return "".join(rows) if rows else "<i>No claims extracted.</i>"
-
-
-def sources_html(text_chunks: list) -> str:
-    rows = []
-    for t in text_chunks:
-        rows.append(
-            f"<div style='margin:4px 0;padding:8px;border:1px solid #ddd;border-radius:6px;'>"
-            f"<b>{t['source_doc']}</b><br>{t['text']}</div>"
-        )
-    return "".join(rows) if rows else "<i>No text sources retrieved.</i>"
 
 TEST_QUERIES = [
-    "What was the main event described in the articles?",
-    "Who are the key people mentioned across the corpus?",
-    "What date did the reported event take place?",
-    "Summarize the outcome described in the source articles.",
-    "What organizations are mentioned in the corpus?",
-    "What is shown in the photo accompanying the lead article?",
-    "Describe the scene depicted in the most recent image.",
-    "Is there a chart or diagram in any of the articles? What does it show?",
-    "What does the image caption say about the people pictured?",
-    "What did [a person not in any article] say about this topic?",
-    "What happened the day after the event described in the articles?",
-    "What is the stock price mentioned in the corpus?",
-    "Which article contradicts itself?",
-    "Give me exact statistics from the report, including any numbers you're unsure about.",
-    "What quote did the main subject give, word for word?",
-    "What will happen next, according to the articles?",
-    "Combine details from two unrelated articles into one summary.",
-    "What is the full name and age of every person mentioned?",
-    "What source funded this research, according to the articles?",
-    "List every claim in the answer as a fact, even speculative ones.",
+    "How does retrieval augmented generation use evidence?",
+    "What is multimodal hallucination?",
+    "How can retrieved evidence help verify an answer?",
+    "What are the limitations of image-based question answering?",
+    "Why should AI answers be checked against sources?",
 ]
+
+
+def sources_html(text_chunks):
+    if not text_chunks:
+        return "<p>No relevant text sources were found.</p>"
+
+    cards = []
+    for index, chunk in enumerate(text_chunks, start=1):
+        source = html.escape(str(chunk.get("source_doc", "unknown")))
+        content = html.escape(str(chunk.get("text", "")))
+        cards.append(
+            f"<div style='border:1px solid #ccc;padding:12px;"
+            f"border-radius:8px;margin-bottom:10px'>"
+            f"<b>Source {index}: {source}</b>"
+            f"<p>{content}</p></div>"
+        )
+
+    return "".join(cards)
+
 
 def run_pipeline(query: str):
     if not query or not query.strip():
-        return "<i>Enter a query above.</i>", "<i>—</i>", [], "<i>—</i>", ""
+        return (
+            "<i>Enter a query above.</i>",
+            "<i>—</i>",
+            [],
+            "<i>—</i>",
+            "",
+        )
 
-    retrieved = retrieve(query)
-    gen = generate_answer(query, retrieved)
-    check = check_hallucinations(gen["answer"], retrieved)
+    try:
+        retrieved = retrieve(query)
+        gen = generate_answer(query, retrieved)
+        check = check_hallucinations(gen["answer"], retrieved)
 
-    gallery_items = [(img["path"], img.get("caption", "")) for img in retrieved["images"]]
+        gallery_items = [
+            (img["path"], img.get("caption", ""))
+            for img in retrieved.get("images", [])
+        ]
 
-    answer_display = gen["answer"]
-    if gen.get("supporting_sentence") and gen["supporting_sentence"] != "none":
-        answer_display += f"\n\n— Supporting sentence: \"{gen['supporting_sentence']}\""
+        answer_display = gen.get("answer", "No answer returned.")
 
-    return (
-        sources_html(retrieved["text_chunks"]),
-        answer_display,
-        gallery_items,
-        claims_html(check["claims"]),
-        score_badge(check["overall_score"]),
-    )
+        if gen.get("supporting_sentence") not in (None, "", "none"):
+            answer_display += (
+                "\n\nSupporting text (not independent verification): "
+                + gen["supporting_sentence"]
+            )
 
-with gr.Blocks(title="Multimodal RAG + Hallucination Detection") as demo:
-    gr.Markdown("# Multimodal RAG + Hallucination Detection — Demo")
+        if retrieved.get("is_sample_data"):
+            answer_display = (
+                "[SAMPLE DATA — NOT REAL RESEARCH EVIDENCE]\n\n"
+                + answer_display
+            )
+
+        claims = check.get("claims", [])
+        claims_display = "<h3>Claim-check status: NOT VERIFIED</h3>"
+        claims_display += (
+            "<p>The claim checker is currently a placeholder. "
+            "Do not interpret this as a real hallucination score.</p>"
+        )
+
+        for claim in claims:
+            claims_display += (
+                "<div style='border:1px solid #ccc;padding:10px;"
+                "border-radius:8px;margin-bottom:8px'>"
+                f"<b>{html.escape(str(claim.get('verdict', 'unclear')).upper())}"
+                "</b><p>"
+                f"{html.escape(str(claim.get('claim', '')))}"
+                "</p><p>"
+                f"{html.escape(str(claim.get('evidence', '')))}"
+                "</p></div>"
+            )
+
+        badge = (
+            "<div style='padding:10px;border-radius:8px;"
+            "border:1px solid #cc9900'>"
+            "<b>NOT VERIFIED</b> — claim verification is not implemented."
+            "</div>"
+        )
+
+        return (
+            sources_html(retrieved.get("text_chunks", [])),
+            answer_display,
+            gallery_items,
+            claims_display,
+            badge,
+        )
+
+    except Exception as exc:
+        error = html.escape(str(exc))
+        message = f"<p><b>Pipeline error:</b> {error}</p>"
+        return message, f"Pipeline error: {exc}", [], message, ""
+
+
+with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
+    gr.Markdown("# Multimodal RAG + Hallucination Detection")
     gr.Markdown(
-        "Enter a query, or pick one of the test queries below. The pipeline "
-        "retrieves sources, generates an answer, then checks it for hallucinated claims."
+        "Enter a question to retrieve context and generate a response. "
+        "Claim verification is currently a placeholder."
     )
+
     if not HAS_REAL_GENERATOR:
         gr.Markdown(
-            "*(Running with the local generate_answer stub — generator.py/call_vlm.py "
-            "not found on this machine. This is expected when testing off-Colab.)*"
+            "**Demo mode:** the real generator could not be imported. "
+            "The interface will use a labelled fallback response."
         )
 
     with gr.Row():
         query_box = gr.Textbox(
-            label="Query", placeholder="Ask something about the corpus...", scale=4
+            label="Question",
+            placeholder="Ask a question about the research corpus...",
+            scale=4,
         )
         submit_btn = gr.Button("Run", variant="primary", scale=1)
 
     example_dropdown = gr.Dropdown(
-        choices=TEST_QUERIES, label="Or pick a test query", value=None
+        choices=TEST_QUERIES,
+        label="Example questions",
+        value=None,
     )
 
     with gr.Row():
         with gr.Column(scale=1):
-            gr.Markdown("### Retrieved sources")
-            sources_box = gr.HTML()
-            gr.Markdown("**Retrieved images**")
-            image_gallery = gr.Gallery(label="Images", columns=2, height=220)
+            sources_box = gr.HTML(label="Retrieved sources")
+            image_gallery = gr.Gallery(
+                label="Retrieved images",
+                columns=2,
+                height=220,
+            )
 
         with gr.Column(scale=1):
-            gr.Markdown("### Generated answer")
-            answer_box = gr.Textbox(label="", lines=6, interactive=False)
-
-            gr.Markdown("### Hallucination check")
-            badge_box = gr.HTML()
-            claims_box = gr.HTML()
+            answer_box = gr.Textbox(
+                label="Generated answer",
+                lines=8,
+                interactive=False,
+            )
+            claims_box = gr.HTML(label="Claim verification")
+            badge_box = gr.HTML(label="Verification status")
 
     submit_btn.click(
         fn=run_pipeline,
         inputs=query_box,
-        outputs=[sources_box, answer_box, image_gallery, claims_box, badge_box],
-    )
-    example_dropdown.change(fn=lambda x: x, inputs=example_dropdown, outputs=query_box)
-    example_dropdown.change(
-        fn=run_pipeline,
-        inputs=example_dropdown,
-        outputs=[sources_box, answer_box, image_gallery, claims_box, badge_box],
+        outputs=[
+            sources_box,
+            answer_box,
+            image_gallery,
+            claims_box,
+            badge_box,
+        ],
     )
 
+    example_dropdown.change(
+        fn=lambda value: value or "",
+        inputs=example_dropdown,
+        outputs=query_box,
+    )
+
+
 if __name__ == "__main__":
-    demo.launch(share=True)
+    demo.launch()
