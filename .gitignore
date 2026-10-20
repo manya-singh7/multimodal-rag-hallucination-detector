@@ -17,4 +17,9 @@ __pycache__/
 # Model caches
 .cache/
 **/.cache/
+# Original research documents and generated images
+data/raw/
+data/processed/images/
 
+# Local backup files
+retriever_backup.py

@@ -1,3 +1,4 @@
+
 import os
 
 from PIL import Image, ImageDraw
@@ -16,109 +17,99 @@ def make_stub_image(path, text, color):
 
 
 def print_result(label, result):
-    print(f"=== {label}: ANSWER ===")
+    print(f"\n=== {label} ===")
     print(result["answer"])
-    print("\n=== SUPPORTING SENTENCE ===")
+    print("\nPossible supporting sentence:")
     print(result.get("supporting_sentence", "N/A"))
-    print("\n=== USED TEXT ===")
-    for chunk in result["used_text"]:
-        print(f"- ({chunk['source_doc']}) {chunk['text'][:80]}...")
-    print("\n=== USED IMAGES ===")
-    for img in result["used_images"]:
-        print(f"- ({img['source_doc']}) {img['path']} - {img['caption']}")
-    print()
+    print("\nText evidence:")
+    for chunk in result.get("used_text", []):
+        print(f"- ({chunk.get('source', 'Unknown')}) "
+              f"{chunk.get('text', '')[:100]}...")
+    print("\nImages:")
+    for img in result.get("used_images", []):
+        print(f"- {img.get('source_doc', 'Unknown')}: "
+              f"{img.get('path', '')}")
+
+
+def sample_text_chunks():
+    return [
+        {
+            "text": (
+                "The company reported revenue of $5.2 million in 2023, "
+                "up 18% year over year."
+            ),
+            "source": "annual_report_2023.pdf",
+            "page": 1,
+        },
+        {
+            "text": (
+                "Growth was driven primarily by the new enterprise product line."
+            ),
+            "source": "annual_report_2023.pdf",
+            "page": 2,
+        },
+    ]
+
+
+def sample_images():
+    paths = [
+        (os.path.join(STUB_IMAGE_DIR, "chart.png"),
+         "Revenue chart 2023", "lightblue"),
+        (os.path.join(STUB_IMAGE_DIR, "diagram.png"),
+         "System diagram", "lightgreen"),
+    ]
+
+    result = []
+    for path, label, color in paths:
+        make_stub_image(path, label, color)
+        result.append(path)
+    return result
 
 
 def test_text_and_images():
-    img1_path = os.path.join(STUB_IMAGE_DIR, "chart.png")
-    img2_path = os.path.join(STUB_IMAGE_DIR, "diagram.png")
-    make_stub_image(img1_path, "Revenue chart 2023", "lightblue")
-    make_stub_image(img2_path, "System diagram", "lightgreen")
-
     retrieved = {
-        "text_chunks": [
-            {
-                "text": "The company reported revenue of $5.2 million in 2023, "
-                        "up 18% year over year.",
-                "source_doc": "annual_report_2023.pdf",
-            },
-            {
-                "text": "Growth was driven primarily by the new enterprise product line.",
-                "source_doc": "annual_report_2023.pdf",
-            },
-        ],
-        "images": [
-            {
-                "path": img1_path,
-                "caption": "Bar chart showing revenue by quarter in 2023",
-                "source_doc": "annual_report_2023.pdf",
-            },
-            {
-                "path": img2_path,
-                "caption": "Diagram of the enterprise product architecture",
-                "source_doc": "product_overview.pdf",
-            },
-        ],
+        "results": sample_text_chunks(),
+        "image_paths": sample_images(),
     }
-
-    query = "What was the company's revenue in 2023 and what drove its growth?"
-    result = generate_answer(query, retrieved)
-    print_result("TEXT + IMAGES", result)
+    query = (
+        "What was the company's revenue in 2023 and what drove its growth?"
+    )
+    print_result(
+        "TEXT + IMAGES",
+        generate_answer(query, retrieved),
+    )
 
 
 def test_text_only():
     retrieved = {
-        "text_chunks": [
-            {
-                "text": "The company reported revenue of $5.2 million in 2023, "
-                        "up 18% year over year.",
-                "source_doc": "annual_report_2023.pdf",
-            },
-            {
-                "text": "Growth was driven primarily by the new enterprise product line.",
-                "source_doc": "annual_report_2023.pdf",
-            },
-        ],
-        "images": [],
+        "results": sample_text_chunks(),
+        "image_paths": [],
     }
-
-    query = "What was the company's revenue in 2023 and what drove its growth?"
-    result = generate_answer(query, retrieved)
-    print_result("TEXT ONLY", result)
+    query = (
+        "What was the company's revenue in 2023 and what drove its growth?"
+    )
+    print_result(
+        "TEXT ONLY",
+        generate_answer(query, retrieved),
+    )
 
 
 def test_images_only():
-    img1_path = os.path.join(STUB_IMAGE_DIR, "chart.png")
-    img2_path = os.path.join(STUB_IMAGE_DIR, "diagram.png")
-    make_stub_image(img1_path, "Revenue chart 2023", "lightblue")
-    make_stub_image(img2_path, "System diagram", "lightgreen")
-
     retrieved = {
-        "text_chunks": [],
-        "images": [
-            {
-                "path": img1_path,
-                "caption": "Bar chart showing revenue by quarter in 2023",
-                "source_doc": "annual_report_2023.pdf",
-            },
-            {
-                "path": img2_path,
-                "caption": "Diagram of the enterprise product architecture",
-                "source_doc": "product_overview.pdf",
-            },
-        ],
+        "results": [],
+        "image_paths": sample_images(),
     }
-
-    query = "What was the company's revenue in 2023 and what drove its growth?"
-    result = generate_answer(query, retrieved)
-    print_result("IMAGES ONLY", result)
-
-
-def main():
-    test_text_and_images()
-    test_text_only()
-    test_images_only()
+    query = (
+        "Describe the supplied images and state what can be established "
+        "about the company's revenue."
+    )
+    print_result(
+        "IMAGES ONLY",
+        generate_answer(query, retrieved),
+    )
 
 
 if __name__ == "__main__":
-    main()
+    test_text_and_images()
+    test_text_only()
+    test_images_only()

@@ -3,109 +3,27 @@ import html
 import time
 import gradio as gr
 
+
 try:
     from generator import generate_answer as _generate_answer_real
     HAS_REAL_GENERATOR = True
-except Exception:
+except Exception as exc:
     _generate_answer_real = None
     HAS_REAL_GENERATOR = False
+    GENERATOR_IMPORT_ERROR = str(exc)
+else:
+    GENERATOR_IMPORT_ERROR = ""
 
 
-def _generate_answer_stub(query: str, retrieved: dict) -> dict:
-    """Offline fallback when the real model is unavailable."""
-    time.sleep(0.2)
-    chunks = retrieved.get("text_chunks") or []
-
-    if chunks:
-        answer = (
-            "The retrieved sample context says that RAG uses relevant "
-            "documents as context for generating answers. This is a "
-            "demonstration response, not a real model-generated answer."
-        )
-        supporting_sentence = chunks[0]["text"]
-    else:
-        answer = (
-            "I could not find relevant evidence. Add research PDFs and "
-            "process them before relying on this pipeline."
-        )
-        supporting_sentence = "none"
-
-    return {
-        "answer": answer,
-        "supporting_sentence": supporting_sentence,
-        "used_text": chunks,
-        "used_images": retrieved.get("images") or [],
-    }
-
-
-def generate_answer(query: str, retrieved: dict) -> dict:
-    """Use the real generator when available; otherwise use a labelled fallback."""
-    if HAS_REAL_GENERATOR:
-        try:
-            return _generate_answer_real(query, retrieved)
-        except Exception as exc:
-            return {
-                "answer": (
-                    "The real generator could not run. Check the model "
-                    f"environment and call_vlm.py. Error: {exc}"
-                ),
-                "supporting_sentence": "none",
-                "used_text": retrieved.get("text_chunks") or [],
-                "used_images": retrieved.get("images") or [],
-            }
-
-    return _generate_answer_stub(query, retrieved)
-
-
-def retrieve(query: str) -> dict:
-    """Connect the existing UI to retriever.py."""
-    from retriever import retrieve as retrieve_documents
-
-    output = retrieve_documents(query, top_k=3)
-    text_chunks = []
-    images = []
-
-    for item in output.get("results", []):
-        text_chunks.append({
-            "text": item.get("text", ""),
-            "source_doc": item.get("source", "unknown"),
-        })
-
-        image_path = item.get("image_path")
-        if image_path:
-            from pathlib import Path
-
-            if Path(image_path).exists():
-                images.append({
-                    "path": image_path,
-                    "caption": item.get("caption", ""),
-                    "source_doc": item.get("source", "unknown"),
-                })
-
-    return {
-        "text_chunks": text_chunks,
-        "images": images,
-        "is_sample_data": output.get("is_sample_data", False),
-    }
-
-
-def check_hallucinations(answer: str, retrieved: dict) -> dict:
-    """
-    Placeholder only. This does not genuinely verify claims.
-    Replace with the project's real claim-verification implementation.
-    """
-    return {
-        "claims": [{
-            "claim": "Automated claim verification is not implemented yet.",
-            "verdict": "unclear",
-            "evidence": (
-                "This is a placeholder. No real claim-level verification "
-                "has been performed."
-            ),
-        }],
-        "overall_score": None,
-        "status": "NOT VERIFIED",
-    }
+try:
+    from verifier import verify_claims
+    HAS_VERIFIER = True
+except Exception as exc:
+    verify_claims = None
+    HAS_VERIFIER = False
+    VERIFIER_IMPORT_ERROR = str(exc)
+else:
+    VERIFIER_IMPORT_ERROR = ""
 
 
 TEST_QUERIES = [
@@ -117,19 +35,128 @@ TEST_QUERIES = [
 ]
 
 
+def retrieve(query: str) -> dict:
+    """Retrieve relevant text and images from the existing retriever."""
+    from retriever import retrieve as retrieve_documents
+
+    output = retrieve_documents(query, top_k=3)
+
+    text_chunks = []
+    images = []
+
+    for item in output.get("results", []):
+        text_chunks.append({
+            "text": item.get("text", ""),
+            "source": item.get("source", "unknown"),
+            "source_doc": item.get("source", "unknown"),
+            "page": item.get("page", "Unknown"),
+        })
+
+        image_path = item.get("image_path")
+
+        if image_path:
+            from pathlib import Path
+
+            if Path(image_path).is_file():
+                images.append({
+                    "path": image_path,
+                    "caption": item.get("caption", ""),
+                    "source_doc": item.get("source", "unknown"),
+                })
+
+    return {
+        "text_chunks": text_chunks,
+        "results": text_chunks,
+        "images": images,
+        "image_paths": [img["path"] for img in images],
+        "is_sample_data": output.get("is_sample_data", False),
+    }
+
+
+def generate_answer(query: str, retrieved: dict) -> dict:
+    """Generate an answer using the real model."""
+    if not HAS_REAL_GENERATOR:
+        raise RuntimeError(
+            "The real generator could not be imported. "
+            f"Details: {GENERATOR_IMPORT_ERROR}"
+        )
+
+    return _generate_answer_real(query, retrieved)
+
+
+def check_hallucinations(answer: str, retrieved: dict) -> dict:
+    """Run the real claim verifier."""
+    if not HAS_VERIFIER:
+        raise RuntimeError(
+            "The claim verifier could not be imported. "
+            f"Details: {VERIFIER_IMPORT_ERROR}"
+        )
+
+    return verify_claims(
+        answer=answer,
+        text_chunks=retrieved.get("text_chunks", []),
+    )
+
+
 def sources_html(text_chunks):
     if not text_chunks:
         return "<p>No relevant text sources were found.</p>"
 
     cards = []
+
     for index, chunk in enumerate(text_chunks, start=1):
-        source = html.escape(str(chunk.get("source_doc", "unknown")))
+        source = html.escape(
+            str(chunk.get("source_doc", chunk.get("source", "unknown")))
+        )
+        page = html.escape(str(chunk.get("page", "Unknown")))
         content = html.escape(str(chunk.get("text", "")))
+
         cards.append(
-            f"<div style='border:1px solid #ccc;padding:12px;"
-            f"border-radius:8px;margin-bottom:10px'>"
+            "<div style='border:1px solid #ccc;padding:12px;"
+            "border-radius:8px;margin-bottom:10px'>"
             f"<b>Source {index}: {source}</b>"
+            f"<p>Page: {page}</p>"
             f"<p>{content}</p></div>"
+        )
+
+    return "".join(cards)
+
+
+def claims_html(check):
+    claims = check.get("claims", [])
+
+    if not claims:
+        return "<p>No answer claims were available to verify.</p>"
+
+    cards = []
+
+    for item in claims:
+        verdict = html.escape(
+            str(item.get("verdict", "Insufficient Evidence"))
+        )
+        claim = html.escape(str(item.get("claim", "")))
+        explanation = html.escape(str(item.get("explanation", "")))
+
+        evidence = item.get("evidence", [])
+        if not isinstance(evidence, list):
+            evidence = []
+
+        evidence_items = "".join(
+            f"<li>{html.escape(str(quote))}</li>"
+            for quote in evidence
+        )
+
+        if not evidence_items:
+            evidence_items = "<li>No validated evidence quote returned.</li>"
+
+        cards.append(
+            "<div style='border:1px solid #ccc;padding:10px;"
+            "border-radius:8px;margin-bottom:8px'>"
+            f"<b>{verdict.upper()}</b>"
+            f"<p><b>Claim:</b> {claim}</p>"
+            f"<p><b>Explanation:</b> {explanation}</p>"
+            f"<p><b>Evidence:</b></p><ul>{evidence_items}</ul>"
+            "</div>"
         )
 
     return "".join(cards)
@@ -139,87 +166,149 @@ def run_pipeline(query: str):
     if not query or not query.strip():
         return (
             "<i>Enter a query above.</i>",
-            "<i>—</i>",
+            "",
             [],
             "<i>—</i>",
             "",
         )
 
     try:
+        # Stage 1: Retrieval
+        start = time.perf_counter()
         retrieved = retrieve(query)
+        retrieval_time = time.perf_counter() - start
+
+        print(f"[TIMING] Retrieval: {retrieval_time:.2f}s", flush=True)
+        print(
+            f"[INFO] Retrieved {len(retrieved.get('text_chunks', []))} "
+            f"text chunks and {len(retrieved.get('images', []))} images.",
+            flush=True,
+        )
+
+        # Stage 2: Answer generation
+        start = time.perf_counter()
         gen = generate_answer(query, retrieved)
-        check = check_hallucinations(gen["answer"], retrieved)
+        generation_time = time.perf_counter() - start
+
+        print(
+            f"[TIMING] Answer generation: {generation_time:.2f}s",
+            flush=True,
+        )
+
+        answer = gen.get("answer", "No answer returned.")
+        if not isinstance(answer, str):
+            answer = str(answer)
+
+        supporting_sentence = gen.get("supporting_sentence")
+
+        if supporting_sentence not in (None, "", "none"):
+            answer += (
+                "\n\nPossible supporting text "
+                "(not independent verification): "
+                + str(supporting_sentence)
+            )
 
         gallery_items = [
             (img["path"], img.get("caption", ""))
             for img in retrieved.get("images", [])
         ]
 
-        answer_display = gen.get("answer", "No answer returned.")
-
-        if gen.get("supporting_sentence") not in (None, "", "none"):
-            answer_display += (
-                "\n\nSupporting text (not independent verification): "
-                + gen["supporting_sentence"]
+        # Stage 3: Claim verification
+        if retrieved.get("is_sample_data"):
+            claims_display = (
+                "<p>Verification skipped because the retriever "
+                "reported sample data.</p>"
             )
+            badge = (
+                "<div style='padding:10px;border:1px solid #cc9900;"
+                "border-radius:8px'>"
+                "<b>SAMPLE DATA</b> — not verified against a real "
+                "research corpus.</div>"
+            )
+            verification_time = 0.0
+
+        else:
+            start = time.perf_counter()
+            check = check_hallucinations(answer, retrieved)
+            verification_time = time.perf_counter() - start
+
+            print(
+                f"[TIMING] Claim verification: "
+                f"{verification_time:.2f}s",
+                flush=True,
+            )
+
+            claims_display = claims_html(check)
+
+            score = check.get("trust_score")
+            if isinstance(score, (int, float)):
+                score_text = f"{score}% evidence-support rate"
+            else:
+                score_text = "Score unavailable"
+
+            badge = (
+                "<div style='padding:10px;border:1px solid #999;"
+                "border-radius:8px'>"
+                f"<b>{html.escape(score_text)}</b><br>"
+                "This is the percentage of claims classified as "
+                "Supported, not a calibrated probability of correctness."
+                "</div>"
+            )
+
+        print(
+            f"[TIMING] Total pipeline: "
+            f"{retrieval_time + generation_time + verification_time:.2f}s",
+            flush=True,
+        )
 
         if retrieved.get("is_sample_data"):
-            answer_display = (
+            answer = (
                 "[SAMPLE DATA — NOT REAL RESEARCH EVIDENCE]\n\n"
-                + answer_display
+                + answer
             )
-
-        claims = check.get("claims", [])
-        claims_display = "<h3>Claim-check status: NOT VERIFIED</h3>"
-        claims_display += (
-            "<p>The claim checker is currently a placeholder. "
-            "Do not interpret this as a real hallucination score.</p>"
-        )
-
-        for claim in claims:
-            claims_display += (
-                "<div style='border:1px solid #ccc;padding:10px;"
-                "border-radius:8px;margin-bottom:8px'>"
-                f"<b>{html.escape(str(claim.get('verdict', 'unclear')).upper())}"
-                "</b><p>"
-                f"{html.escape(str(claim.get('claim', '')))}"
-                "</p><p>"
-                f"{html.escape(str(claim.get('evidence', '')))}"
-                "</p></div>"
-            )
-
-        badge = (
-            "<div style='padding:10px;border-radius:8px;"
-            "border:1px solid #cc9900'>"
-            "<b>NOT VERIFIED</b> — claim verification is not implemented."
-            "</div>"
-        )
 
         return (
             sources_html(retrieved.get("text_chunks", [])),
-            answer_display,
+            answer,
             gallery_items,
             claims_display,
             badge,
         )
 
     except Exception as exc:
+        print(f"[ERROR] {type(exc).__name__}: {exc}", flush=True)
+
         error = html.escape(str(exc))
         message = f"<p><b>Pipeline error:</b> {error}</p>"
-        return message, f"Pipeline error: {exc}", [], message, ""
+
+        return (
+            message,
+            f"Pipeline error: {exc}",
+            [],
+            message,
+            "",
+        )
 
 
 with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
     gr.Markdown("# Multimodal RAG + Hallucination Detection")
+
     gr.Markdown(
-        "Enter a question to retrieve context and generate a response. "
-        "Claim verification is currently a placeholder."
+        "Retrieve research evidence, generate an answer, and evaluate "
+        "individual claims against retrieved text. The evidence-support "
+        "score is not a calibrated probability of correctness."
     )
 
     if not HAS_REAL_GENERATOR:
         gr.Markdown(
-            "**Demo mode:** the real generator could not be imported. "
-            "The interface will use a labelled fallback response."
+            "**Generator unavailable:** check generator.py and "
+            f"call_vlm.py. Details: {GENERATOR_IMPORT_ERROR}"
+        )
+
+    if not HAS_VERIFIER:
+        gr.Markdown(
+            "**Verifier unavailable:** check verifier.py. "
+            f"Details: {VERIFIER_IMPORT_ERROR}"
         )
 
     with gr.Row():
@@ -252,7 +341,7 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
                 interactive=False,
             )
             claims_box = gr.HTML(label="Claim verification")
-            badge_box = gr.HTML(label="Verification status")
+            badge_box = gr.HTML(label="Evidence-support score")
 
     submit_btn.click(
         fn=run_pipeline,
@@ -274,4 +363,4 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
 
 
 if __name__ == "__main__":
-    demo.launch()
+    demo.queue(default_concurrency_limit=1).launch()
