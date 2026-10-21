@@ -1,6 +1,7 @@
 
 import json
 import re
+from pathlib import Path
 
 from call_vlm import call_vlm
 
@@ -10,6 +11,29 @@ ALLOWED_VERDICTS = {
     "Contradicted",
     "Insufficient Evidence",
 }
+
+# Cap on images sent to the model per answer (keeps latency and cost bounded).
+MAX_IMAGES = 3
+
+# Abbreviations whose trailing period must not end a sentence. Matching is
+# case-sensitive so units such as "ms." or the word "no." are not affected.
+_ABBREVIATIONS = (
+    "et al", "e.g", "i.e", "cf", "vs", "approx",
+    "Fig", "Figs", "Eq", "Eqs", "Ref", "Refs",
+    "Dr", "Mr", "Mrs", "Ms", "Prof",
+)
+_ABBREVIATION_RE = re.compile(
+    r"\b(" + "|".join(re.escape(item) for item in _ABBREVIATIONS) + r")\."
+)
+_PROTECTED_DOT = ""
+
+
+def _protect_abbreviations(text: str) -> str:
+    return _ABBREVIATION_RE.sub(lambda m: m.group(1) + _PROTECTED_DOT, text)
+
+
+def _restore_abbreviations(text: str) -> str:
+    return text.replace(_PROTECTED_DOT, ".")
 
 
 def split_claims(answer: str) -> list[str]:
@@ -89,12 +113,14 @@ def split_claims(answer: str) -> list[str]:
         else:
             flush()
 
+            # Abbreviations such as "et al.", "Fig." and "e.g." are protected
+            # so a citation does not break a sentence into fragments.
             parts = re.split(
                 r"(?<=[.!?])\s+(?=[A-Z])",
-                text,
+                _protect_abbreviations(text),
             )
             claims.extend(
-                part.strip()
+                _restore_abbreviations(part).strip()
                 for part in parts
                 if part.strip()
             )
@@ -137,18 +163,63 @@ def _quote_exists(quote: str, evidence_texts: list[str]) -> bool:
     )
 
 
-def verify_claims(answer: str, text_chunks: list[dict]) -> dict:
-    """Verify answer claims against retrieved text using the configured model."""
+def _build_result(verified: list[dict]) -> dict:
+    """Assemble the final result in the agreed output schema."""
+    total = len(verified)
+    supported = sum(item["verdict"] == "Supported" for item in verified)
+    contradicted = sum(item["verdict"] == "Contradicted" for item in verified)
 
-    claims = split_claims(answer)
+    # Percentage of claims labeled Supported; not factual accuracy probability.
+    trust_score = round(100 * supported / total) if total else 0
 
-    if not claims:
-        return {
-            "claims": [],
-            "trust_score": 0,
-            "total_claims": 0,
-            "supported_claims": 0,
+    return {
+        "claims": verified,
+        "trust_score": trust_score,
+        "total_claims": total,
+        "supported_claims": supported,
+        "n_contradicted": contradicted,
+    }
+
+
+def _insufficient(claims: list[str], explanation: str) -> list[dict]:
+    return [
+        {
+            "claim": claim,
+            "verdict": "Insufficient Evidence",
+            "evidence": [],
+            "modality": "none",
+            "explanation": explanation,
         }
+        for claim in claims
+    ]
+
+
+def _parse_json_claims(response) -> list:
+    """Pull the "claims" list out of a model reply that should be JSON."""
+    if isinstance(response, dict):
+        raw = response.get("text", "")
+    else:
+        raw = str(response or "")
+
+    match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
+
+    if not match:
+        raise ValueError("No JSON object found in model response.")
+
+    parsed = json.loads(match.group(0))
+    results = parsed.get("claims", [])
+
+    if not isinstance(results, list):
+        raise ValueError("The claims field must be a list.")
+
+    return results
+
+
+def _verify_text(
+    claims: list[str],
+    text_chunks: list[dict],
+) -> list[dict]:
+    """Verify claims against retrieved text only (one model call)."""
 
     evidence_texts = []
     evidence_blocks = []
@@ -179,20 +250,7 @@ def verify_claims(answer: str, text_chunks: list[dict]) -> dict:
         )
 
     if not evidence_blocks:
-        return {
-            "claims": [
-                {
-                    "claim": claim,
-                    "verdict": "Insufficient Evidence",
-                    "evidence": [],
-                    "explanation": "No retrieved evidence was provided.",
-                }
-                for claim in claims
-            ],
-            "trust_score": 0,
-            "total_claims": len(claims),
-            "supported_claims": 0,
-        }
+        return _insufficient(claims, "No retrieved evidence was provided.")
 
     prompt = f"""
 You are an evidence-grounded claim verification system.
@@ -232,42 +290,13 @@ Required JSON:
 """
 
     try:
-        response = call_vlm(prompt)
-
-        if isinstance(response, dict):
-            raw = response.get("text", "")
-        else:
-            raw = str(response or "")
-
-        match = re.search(r"\{.*\}", raw, flags=re.DOTALL)
-
-        if not match:
-            raise ValueError("No JSON object found in model response.")
-
-        parsed = json.loads(match.group(0))
-        model_results = parsed.get("claims", [])
-
-        if not isinstance(model_results, list):
-            raise ValueError("The claims field must be a list.")
+        model_results = _parse_json_claims(call_vlm(prompt))
 
     except Exception as exc:
-        return {
-            "claims": [
-                {
-                    "claim": claim,
-                    "verdict": "Insufficient Evidence",
-                    "evidence": [],
-                    "explanation": (
-                        "Verification failed: "
-                        + type(exc).__name__
-                    ),
-                }
-                for claim in claims
-            ],
-            "trust_score": 0,
-            "total_claims": len(claims),
-            "supported_claims": 0,
-        }
+        return _insufficient(
+            claims,
+            "Verification failed: " + type(exc).__name__,
+        )
 
     verified = []
 
@@ -307,6 +336,11 @@ Required JSON:
                 "claim": claim,
                 "verdict": verdict,
                 "evidence": valid_quotes,
+                "modality": (
+                    "text"
+                    if verdict in ("Supported", "Contradicted")
+                    else "none"
+                ),
                 "explanation": str(
                     item.get("explanation", "")
                     or "No explanation provided."
@@ -314,17 +348,236 @@ Required JSON:
             }
         )
 
-    supported = sum(
-        item["verdict"] == "Supported"
-        for item in verified
-    )
+    return verified
 
-    # Percentage of claims labeled Supported; not factual accuracy probability.
-    trust_score = round(100 * supported / len(claims))
 
-    return {
-        "claims": verified,
-        "trust_score": trust_score,
-        "total_claims": len(claims),
-        "supported_claims": supported,
-    }
+# ---------------------------------------------------------------------------
+# Image (pixel) verification
+# ---------------------------------------------------------------------------
+
+def _prepare_images(images: list) -> list[dict]:
+    """Keep up to MAX_IMAGES images whose files actually exist.
+
+    Accepts the agreed {path, caption, source_doc} dicts (captions are never
+    read) or plain path strings. Missing files are skipped so the model is
+    never asked to judge an image it cannot see.
+    """
+    prepared = []
+
+    for image in images or []:
+        if isinstance(image, dict):
+            path = image.get("path") or image.get("image_path")
+            source = image.get("source_doc") or image.get("source") or ""
+        else:
+            path = image
+            source = ""
+
+        if not path or not Path(str(path)).is_file():
+            continue
+
+        prepared.append(
+            {
+                "path": str(path),
+                "source": str(source) or Path(str(path)).name,
+            }
+        )
+
+        if len(prepared) >= MAX_IMAGES:
+            break
+
+    return prepared
+
+
+def _image_prompt(claims: list[str]) -> str:
+    """Prompt that checks claims against what an image actually shows.
+
+    The caption is deliberately NOT included: the image is judged on its
+    pixels, so a wrong caption cannot leak into the verdict.
+    """
+    return f"""
+You are checking claims against ONE image.
+
+Look carefully at the image. Judge only what the image actually shows.
+Ignore any caption or surrounding text you might expect to accompany it,
+and do not use outside knowledge.
+
+For every claim return one verdict:
+- "Supported": the image clearly shows what the claim says.
+- "Contradicted": the image clearly shows the OPPOSITE of what the claim
+  says about this image (for example the claim says a value rises but the
+  image shows it falling).
+- "Not Shown": the image is unrelated to the claim, or does not show enough
+  to decide. Use this whenever the claim is not about the visual content.
+
+Rules:
+1. Check trends, directions, counts, labels, and numbers against the image.
+2. Return one result per claim, in the same order.
+3. In "description", write one short sentence about what you actually see
+   that is relevant to the claim.
+4. Return valid JSON only, without Markdown fences.
+
+Claims:
+{json.dumps(claims, ensure_ascii=False, indent=2)}
+
+Required JSON:
+{{
+  "claims": [
+    {{
+      "verdict": "Supported",
+      "description": "what the image shows"
+    }}
+  ]
+}}
+"""
+
+
+def _normalize_image_verdict(value) -> str:
+    text = str(value or "").strip().casefold().replace("_", " ")
+
+    if text.startswith("contradict"):
+        return "Contradicted"
+
+    if text == "supported" or text.startswith("support"):
+        return "Supported"
+
+    return "Not Shown"
+
+
+def _check_image(claims: list[str], image: dict):
+    """Check every claim against one image (one model call).
+
+    Returns a list with one {"verdict", "description"} per claim, or None if
+    the call or its reply failed, so a bad image never breaks the text result.
+    """
+    try:
+        results = _parse_json_claims(
+            call_vlm(_image_prompt(claims), images=[image["path"]])
+        )
+    except Exception:
+        return None
+
+    checked = []
+
+    for index in range(len(claims)):
+        item = (
+            results[index]
+            if index < len(results) and isinstance(results[index], dict)
+            else {}
+        )
+        checked.append(
+            {
+                "verdict": _normalize_image_verdict(item.get("verdict")),
+                "description": str(item.get("description", "") or "").strip(),
+            }
+        )
+
+    return checked
+
+
+def _merge_with_images(text_item: dict, findings: list[tuple]) -> dict:
+    """Combine a text verdict with image findings for one claim.
+
+    findings: (label, verdict, description) per checked image.
+    Contradiction override: if any image shows the opposite of the claim, the
+    verdict is Contradicted even when the retrieved text supports the claim.
+    """
+    text_verdict = text_item["verdict"]
+    contradicting = [f for f in findings if f[1] == "Contradicted"]
+    supporting = [f for f in findings if f[1] == "Supported"]
+
+    def describe(finding):
+        label, _, description = finding
+        return f"{label}: {description}" if description else label
+
+    if contradicting:
+        explanation = (
+            f"{contradicting[0][0]} contradicts this claim"
+            + (f": {contradicting[0][2]}" if contradicting[0][2] else ".")
+        )
+
+        if text_verdict == "Supported":
+            explanation += (
+                " The retrieved text supports the claim, "
+                "but the image shows the opposite."
+            )
+
+        return {
+            "claim": text_item["claim"],
+            "verdict": "Contradicted",
+            "evidence": text_item["evidence"]
+            + [describe(f) for f in contradicting],
+            "modality": (
+                "text+image" if text_verdict == "Contradicted" else "image"
+            ),
+            "explanation": explanation,
+        }
+
+    if text_verdict == "Contradicted":
+        return text_item
+
+    if supporting:
+        evidence = text_item["evidence"] + [describe(f) for f in supporting]
+
+        if text_verdict == "Supported":
+            return {
+                **text_item,
+                "evidence": evidence,
+                "modality": "text+image",
+                "explanation": text_item["explanation"]
+                + " The image also supports this claim.",
+            }
+
+        return {
+            "claim": text_item["claim"],
+            "verdict": "Supported",
+            "evidence": evidence,
+            "modality": "image",
+            "explanation": (
+                f"{supporting[0][0]} supports this claim"
+                + (f": {supporting[0][2]}" if supporting[0][2] else ".")
+            ),
+        }
+
+    return text_item
+
+
+def verify_claims(
+    answer: str,
+    text_chunks: list[dict],
+    images: list[dict] = None,
+) -> dict:
+    """Verify answer claims against retrieved text and, optionally, images.
+
+    Text is checked first. If images are given, each (up to MAX_IMAGES) is then
+    checked on its pixels only, and an image that shows the opposite of a claim
+    overrides the text verdict with "Contradicted".
+    """
+
+    claims = split_claims(answer)
+
+    if not claims:
+        return _build_result([])
+
+    text_items = _verify_text(claims, text_chunks)
+
+    findings = [[] for _ in claims]
+
+    for number, image in enumerate(_prepare_images(images), start=1):
+        checked = _check_image(claims, image)
+
+        if checked is None:
+            continue
+
+        label = f"Image {number} ({image['source']})"
+
+        for index, result in enumerate(checked):
+            findings[index].append(
+                (label, result["verdict"], result["description"])
+            )
+
+    verified = [
+        _merge_with_images(item, findings[index])
+        for index, item in enumerate(text_items)
+    ]
+
+    return _build_result(verified)
