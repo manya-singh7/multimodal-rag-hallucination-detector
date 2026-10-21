@@ -98,11 +98,11 @@ def _find_supporting_sentence(answer, text_chunks):
 
             for ans_words in ans_word_sets:
                 overlap = len(ans_words & src_words)
-                if overlap > best_overlap:
+                if overlap >= 3 and overlap > best_overlap:
                     best_overlap = overlap
                     best_sentence = sentence
 
-    return best_sentence if best_overlap > 0 else "none"
+    return best_sentence if best_overlap >= 3 else "none"
 
 
 def generate_answer(query, retrieved):

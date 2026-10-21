@@ -80,6 +80,7 @@ The codebase is organized by pipeline category:
 
 * Self-verification model bias: The same underlying Gemini model is used for both generating answers and verifying claims. While structured prompts and independent pixel checks mitigate this, model biases can still carry across stages.
 * Heuristic sentence attribution: The supporting sentence is selected via a word-overlap heuristic rather than deep syntactic or semantic entailment.
+* The supporting sentence only points to text found by word overlap, and claims that come from images are checked by the verifier, not by this line.
 * The demo needs a Gemini API key and is subject to rate limits, and real model behavior has been tested only partly.
 * Small corpus: The current knowledge base contains only 2 arXiv research papers, limiting the breadth of questions that have retrieved evidence.
 * Extracted PDF figures have no captions: Figures extracted from the PDFs do not retain their original captions in the image files, so image verification relies entirely on what is visible within the image pixels.
