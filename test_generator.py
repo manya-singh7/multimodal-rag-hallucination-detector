@@ -174,6 +174,34 @@ def test_supporting_sentence_stopword_only_returns_none():
     assert sentence2 == "none"
 
 
+def test_supporting_sentence_two_word_overlap_returns_none():
+    # Only two non-stopwords ("revenue", "increased") overlap between answer and chunk;
+    # with threshold 3, this must return "none".
+    answer = "The revenue increased significantly."
+    chunks = [
+        {
+            "text": "The revenue increased despite heavy market losses."
+        }
+    ]
+    sentence = _find_supporting_sentence(answer, chunks)
+    assert sentence == "none"
+
+
+def test_supporting_sentence_three_or_more_words_returns_best():
+    answer = "The enterprise product drove revenue growth."
+    chunks = [
+        {
+            "text": (
+                "The enterprise product expanded across markets. "
+                "The enterprise product drove strong sales. "
+                "The enterprise product drove strong revenue gains."
+            )
+        }
+    ]
+    sentence = _find_supporting_sentence(answer, chunks)
+    assert sentence == "The enterprise product drove strong revenue gains"
+
+
 def test_supporting_sentence_best_sentence_wins():
     answer = "Revenue reached five million dollars in 2023."
     chunks = [
