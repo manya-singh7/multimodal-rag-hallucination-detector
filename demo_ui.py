@@ -470,6 +470,7 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
                 label="Retrieved images",
                 columns=2,
                 height=220,
+                object_fit="contain",
             )
 
         with gr.Column(scale=1):
