@@ -10,7 +10,7 @@ from PIL import Image
 load_dotenv()
 
 API_KEY = os.getenv("GEMINI_API_KEY")
-MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-3.8-flash")
+MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 MAX_ATTEMPTS = 4
 INITIAL_RETRY_DELAY = 2

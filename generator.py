@@ -1,7 +1,51 @@
-
+import re
 from pathlib import Path
 
 from call_vlm import call_vlm
+
+STOPWORDS = {
+    "a", "about", "above", "after", "again", "against", "all", "am", "an",
+    "and", "any", "are", "aren't", "as", "at", "be", "because", "been",
+    "before", "being", "below", "between", "both", "but", "by", "can",
+    "can't", "cannot", "could", "couldn't", "did", "didn't", "do", "does",
+    "doesn't", "doing", "don't", "down", "during", "each", "few", "for",
+    "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't",
+    "having", "he", "he'd", "he'll", "he's", "her", "here", "here's",
+    "hers", "herself", "him", "himself", "his", "how", "how's", "i",
+    "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't",
+    "it", "it's", "its", "itself", "let's", "me", "more", "most", "mustn't",
+    "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only",
+    "or", "other", "ought", "our", "ours", "ourselves", "out", "over",
+    "own", "same", "shan't", "she", "she'd", "she'll", "she's", "should",
+    "shouldn't", "so", "some", "such", "than", "that", "that's", "the",
+    "their", "theirs", "them", "themselves", "then", "there", "there's",
+    "these", "they", "they'd", "they'll", "they're", "they've", "this",
+    "those", "through", "to", "too", "under", "until", "up", "very", "was",
+    "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't",
+    "what", "what's", "when", "when's", "where", "where's", "which",
+    "while", "who", "who's", "whom", "why", "why's", "with", "won't",
+    "would", "wouldn't", "you", "you'd", "you'll", "you're", "you've",
+    "your", "yours", "yourself", "yourselves",
+}
+
+
+def _extract_words(text: str) -> set[str]:
+    """Extract lowercased non-stopword tokens from text."""
+    tokens = re.findall(r"\b[a-zA-Z0-9]+\b", text.lower())
+    return {w for w in tokens if w not in STOPWORDS}
+
+
+def _split_sentences(text: str) -> list[str]:
+    """Split text into individual sentences, stripping whitespace and trailing periods."""
+    if not text:
+        return []
+    parts = re.split(r"(?<=[.!?])\s+|\n+", text)
+    sentences = []
+    for s in parts:
+        cleaned = s.strip().rstrip(".")
+        if cleaned:
+            sentences.append(cleaned)
+    return sentences
 
 
 def _build_prompt(query, text_chunks, images):
@@ -33,22 +77,32 @@ def _find_supporting_sentence(answer, text_chunks):
     if not answer or not text_chunks:
         return "none"
 
-    answer_words = set(answer.lower().split())
+    answer_sentences = _split_sentences(answer)
+    if not answer_sentences:
+        return "none"
+
+    ans_word_sets = [_extract_words(s) for s in answer_sentences]
+    ans_word_sets = [ws for ws in ans_word_sets if ws]
+    if not ans_word_sets:
+        return "none"
+
     best_sentence = "none"
     best_overlap = 0
 
     for chunk in text_chunks:
-        for sentence in chunk.get("text", "").split(". "):
-            sentence = sentence.strip().rstrip(".")
-            if not sentence:
+        chunk_text = chunk.get("text", "") if isinstance(chunk, dict) else str(chunk)
+        for sentence in _split_sentences(chunk_text):
+            src_words = _extract_words(sentence)
+            if not src_words:
                 continue
 
-            overlap = len(answer_words & set(sentence.lower().split()))
-            if overlap > best_overlap:
-                best_overlap = overlap
-                best_sentence = sentence
+            for ans_words in ans_word_sets:
+                overlap = len(ans_words & src_words)
+                if overlap >= 3 and overlap > best_overlap:
+                    best_overlap = overlap
+                    best_sentence = sentence
 
-    return best_sentence if best_overlap else "none"
+    return best_sentence if best_overlap >= 3 else "none"
 
 
 def generate_answer(query, retrieved):
