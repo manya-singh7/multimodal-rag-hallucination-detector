@@ -1,7 +1,16 @@
-
 import html
+import os
+import re
 import time
+from pathlib import Path
+
 import gradio as gr
+
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass
 
 
 try:
@@ -27,23 +36,78 @@ else:
 
 
 TEST_QUERIES = [
-    "How does retrieval augmented generation use evidence?",
-    "What is multimodal hallucination?",
-    "How can retrieved evidence help verify an answer?",
-    "What are the limitations of image-based question answering?",
-    "Why should AI answers be checked against sources?",
+    # Normal text questions
+    "What are the two primary stages from which hallucinations arise in RAG models?",
+    "What is the middle curse in long contexts?",
+    "What is the difference between intrinsic and extrinsic hallucination?",
+    "Why do the authors say prompt engineering is useful for hallucination mitigation?",
+    "How does the RAPTOR method organize retrieved text?",
+    "How many videos and question-answer pairs does the ANCHOR benchmark contain?",
+    "How is the difficulty of each question assigned in ANCHOR?",
+    "What happens to accuracy when video is removed in the grounding-cue ablation?",
+    "How well do the LLM judges agree with human raters in ANCHOR?",
+    # Figure questions
+    "What does Figure 1 of the review show about the causes of hallucinations and their mitigation methods?",
+    "What does Figure 2 of the review show about the basic workflow of retrieval-augmented generation?",
+    "What does the ANCHOR dataset composition figure show about video duration and resolution?",
+    "What does Figure 4 show about reasoning similarity between models?",
+    # Trick queries (false premises)
+    "The review says hallucinations in RAG come only from the generation phase. Explain that claim.",
+    "ANCHOR contains over 50,000 videos. Which domains do they cover?",
+    "In the ablation, removing audio caused a much larger accuracy drop than removing video. Why?",
+    "What did the review conclude about quantum retrieval methods?",
+    "Figure 4 shows that Claude and GPT-5.2 have the lowest agreement of any model pair. Explain this.",
+    # Contradiction demo (needs data/processed/text/demo_contradiction.json
+    # and data/processed/images/demo_contradiction_p1_img1.png)
+    "How did annual revenue change from 2019 to 2023?",
 ]
+
+SUPPORTED_STYLE = (
+    "background-color:#d4edda;color:#155724;padding:2px 6px;"
+    "border-radius:4px;margin:0 2px;"
+)
+UNSUPPORTED_STYLE = (
+    "background-color:#f8d7da;color:#721c24;padding:2px 6px;"
+    "border-radius:4px;margin:0 2px;"
+)
+
+_IMAGE_NAME_RE = re.compile(r"^(?P<doc>.+)_p(?P<page>\d+)_img")
+
+MODALITY_LABELS = {
+    "text": "retrieved text",
+    "image": "image",
+    "text+image": "retrieved text + image",
+    "none": "no evidence found",
+}
+
+
+def api_key_missing() -> bool:
+    key = os.getenv("GEMINI_API_KEY")
+    return not key or key == "put_your_api_key_here"
+
+
+API_KEY_MESSAGE = (
+    "<p><b>Gemini API key missing.</b> Create a file named <code>.env</code> "
+    "in the project folder containing <code>GEMINI_API_KEY=your_key_here</code>, "
+    "then restart the app.</p>"
+)
+
+
+def _image_label(path: str) -> str:
+    """Gallery label parsed from the retriever's <doc>_p<page>_img* filenames."""
+    match = _IMAGE_NAME_RE.match(Path(path).stem)
+    if match:
+        return f"{match.group('doc')}, page {match.group('page')}"
+    return Path(path).name
 
 
 def retrieve(query: str) -> dict:
-    """Retrieve relevant text and images from the existing retriever."""
+    """Retrieve relevant text and images and normalize them for the UI."""
     from retriever import retrieve as retrieve_documents
 
     output = retrieve_documents(query, top_k=3)
 
     text_chunks = []
-    images = []
-
     for item in output.get("results", []):
         text_chunks.append({
             "text": item.get("text", ""),
@@ -52,17 +116,16 @@ def retrieve(query: str) -> dict:
             "page": item.get("page", "Unknown"),
         })
 
-        image_path = item.get("image_path")
-
-        if image_path:
-            from pathlib import Path
-
-            if Path(image_path).is_file():
-                images.append({
-                    "path": image_path,
-                    "caption": item.get("caption", ""),
-                    "source_doc": item.get("source", "unknown"),
-                })
+    # The retriever returns page images in "image_paths"
+    # (the per-result "image_path" field is always None).
+    images = []
+    for path in output.get("image_paths", []):
+        if Path(path).is_file():
+            images.append({
+                "path": path,
+                "caption": "",
+                "source_doc": Path(path).name,
+            })
 
     return {
         "text_chunks": text_chunks,
@@ -85,7 +148,7 @@ def generate_answer(query: str, retrieved: dict) -> dict:
 
 
 def check_hallucinations(answer: str, retrieved: dict) -> dict:
-    """Run the real claim verifier."""
+    """Run the multimodal claim verifier (retrieved text + images)."""
     if not HAS_VERIFIER:
         raise RuntimeError(
             "The claim verifier could not be imported. "
@@ -94,7 +157,8 @@ def check_hallucinations(answer: str, retrieved: dict) -> dict:
 
     return verify_claims(
         answer=answer,
-        text_chunks=retrieved.get("text_chunks", []),
+        text_chunks=retrieved["text_chunks"],
+        images=retrieved.get("images", []),
     )
 
 
@@ -137,6 +201,9 @@ def claims_html(check):
         claim = html.escape(str(item.get("claim", "")))
         explanation = html.escape(str(item.get("explanation", "")))
 
+        modality = str(item.get("modality", "none"))
+        modality_label = html.escape(MODALITY_LABELS.get(modality, modality))
+
         evidence = item.get("evidence", [])
         if not isinstance(evidence, list):
             evidence = []
@@ -147,19 +214,99 @@ def claims_html(check):
         )
 
         if not evidence_items:
-            evidence_items = "<li>No validated evidence quote returned.</li>"
+            evidence_items = "<li>No validated evidence returned.</li>"
 
         cards.append(
             "<div style='border:1px solid #ccc;padding:10px;"
             "border-radius:8px;margin-bottom:8px'>"
             f"<b>{verdict.upper()}</b>"
             f"<p><b>Claim:</b> {claim}</p>"
+            f"<p><b>Checked against:</b> {modality_label}</p>"
             f"<p><b>Explanation:</b> {explanation}</p>"
             f"<p><b>Evidence:</b></p><ul>{evidence_items}</ul>"
             "</div>"
         )
 
     return "".join(cards)
+
+
+def status_badge(check: dict) -> str:
+    """Feature #2: categorical status badge (thresholds from the project doc)."""
+    total = check.get("total_claims", 0)
+    score = check.get("trust_score", 0)
+    n_contradicted = check.get("n_contradicted", 0)
+
+    if total == 0:
+        icon, label = "⚪", "No verifiable claims"
+        bg, fg = "#e2e3e5", "#383d41"
+        detail = "The answer contained no claims to check."
+    else:
+        if score == 100 and n_contradicted == 0:
+            icon, label = "🟢", "Verified"
+            bg, fg = "#d4edda", "#155724"
+        elif 0 < score < 100 and n_contradicted == 0:
+            icon, label = "🟡", "Partially Supported"
+            bg, fg = "#fff3cd", "#856404"
+        else:
+            icon, label = "🔴", "Unsupported / Contradicted"
+            bg, fg = "#f8d7da", "#721c24"
+
+        detail = (
+            f"{score}% evidence-support rate "
+            f"({check.get('supported_claims', 0)}/{total} claims supported, "
+            f"{n_contradicted} contradicted)"
+        )
+
+    return (
+        f"<div style='padding:14px;border-radius:10px;background:{bg};"
+        f"color:{fg};margin-bottom:10px'>"
+        f"<div style='font-size:1.2em'><b>{icon} {label}</b></div>"
+        f"<div>{html.escape(detail)}</div>"
+        "<div style='font-size:0.85em;margin-top:4px'>"
+        "The evidence-support rate is the percentage of claims classified as "
+        "Supported, not accuracy or a calibrated probability.</div></div>"
+    )
+
+
+def highlighted_answer(answer: str, claims: list[dict]) -> str:
+    """Feature #1: each verified claim wrapped in a green or red span.
+
+    Built from the verifier's claims (not by string-matching the raw answer),
+    because the verifier normalizes text (strips Markdown, merges list items).
+    If there are no claims (for example a refusal), the raw answer is shown.
+    """
+    if not claims:
+        return f"<p>{html.escape(answer)}</p>"
+
+    spans = []
+    for item in claims:
+        verdict = str(item.get("verdict", "Insufficient Evidence"))
+        style = SUPPORTED_STYLE if verdict == "Supported" else UNSUPPORTED_STYLE
+        spans.append(
+            f'<span style="{style}" title="{html.escape(verdict)}">'
+            f'{html.escape(str(item.get("claim", "")))}</span>'
+        )
+
+    return (
+        "<div style='line-height:2.2'>"
+        + " ".join(spans)
+        + "</div>"
+        "<div style='font-size:0.85em;margin-top:8px'>"
+        f"<span style='{SUPPORTED_STYLE}'>Supported</span> "
+        f"<span style='{UNSUPPORTED_STYLE}'>Contradicted / Unsupported</span>"
+        "</div>"
+    )
+
+
+def supporting_note(gen: dict) -> str:
+    sentence = gen.get("supporting_sentence")
+    if sentence in (None, "", "none"):
+        return ""
+    return (
+        "<p style='font-size:0.85em'><i>Possible supporting text "
+        "(not independent verification): "
+        f"{html.escape(str(sentence))}</i></p>"
+    )
 
 
 def run_pipeline(query: str):
@@ -169,6 +316,15 @@ def run_pipeline(query: str):
             "",
             [],
             "<i>—</i>",
+            "",
+        )
+
+    if api_key_missing():
+        return (
+            API_KEY_MESSAGE,
+            API_KEY_MESSAGE,
+            [],
+            API_KEY_MESSAGE,
             "",
         )
 
@@ -199,17 +355,8 @@ def run_pipeline(query: str):
         if not isinstance(answer, str):
             answer = str(answer)
 
-        supporting_sentence = gen.get("supporting_sentence")
-
-        if supporting_sentence not in (None, "", "none"):
-            answer += (
-                "\n\nPossible supporting text "
-                "(not independent verification): "
-                + str(supporting_sentence)
-            )
-
         gallery_items = [
-            (img["path"], img.get("caption", ""))
+            (img["path"], _image_label(img["path"]))
             for img in retrieved.get("images", [])
         ]
 
@@ -220,10 +367,14 @@ def run_pipeline(query: str):
                 "reported sample data.</p>"
             )
             badge = (
-                "<div style='padding:10px;border:1px solid #cc9900;"
-                "border-radius:8px'>"
+                "<div style='padding:14px;border-radius:10px;"
+                "background:#fff3cd;color:#856404'>"
                 "<b>SAMPLE DATA</b> — not verified against a real "
                 "research corpus.</div>"
+            )
+            answer_display = (
+                "<p><b>[SAMPLE DATA — NOT REAL RESEARCH EVIDENCE]</b></p>"
+                f"<p>{html.escape(answer)}</p>" + supporting_note(gen)
             )
             verification_time = 0.0
 
@@ -239,20 +390,10 @@ def run_pipeline(query: str):
             )
 
             claims_display = claims_html(check)
-
-            score = check.get("trust_score")
-            if isinstance(score, (int, float)):
-                score_text = f"{score}% evidence-support rate"
-            else:
-                score_text = "Score unavailable"
-
-            badge = (
-                "<div style='padding:10px;border:1px solid #999;"
-                "border-radius:8px'>"
-                f"<b>{html.escape(score_text)}</b><br>"
-                "This is the percentage of claims classified as "
-                "Supported, not a calibrated probability of correctness."
-                "</div>"
+            badge = status_badge(check)
+            answer_display = (
+                highlighted_answer(answer, check.get("claims", []))
+                + supporting_note(gen)
             )
 
         print(
@@ -261,15 +402,9 @@ def run_pipeline(query: str):
             flush=True,
         )
 
-        if retrieved.get("is_sample_data"):
-            answer = (
-                "[SAMPLE DATA — NOT REAL RESEARCH EVIDENCE]\n\n"
-                + answer
-            )
-
         return (
             sources_html(retrieved.get("text_chunks", [])),
-            answer,
+            answer_display,
             gallery_items,
             claims_display,
             badge,
@@ -283,7 +418,7 @@ def run_pipeline(query: str):
 
         return (
             message,
-            f"Pipeline error: {exc}",
+            message,
             [],
             message,
             "",
@@ -295,9 +430,12 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
 
     gr.Markdown(
         "Retrieve research evidence, generate an answer, and evaluate "
-        "individual claims against retrieved text. The evidence-support "
-        "score is not a calibrated probability of correctness."
+        "individual claims against retrieved text and images. The "
+        "evidence-support rate is not accuracy or a calibrated probability."
     )
+
+    if api_key_missing():
+        gr.HTML(API_KEY_MESSAGE)
 
     if not HAS_REAL_GENERATOR:
         gr.Markdown(
@@ -332,16 +470,13 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
                 label="Retrieved images",
                 columns=2,
                 height=220,
+                object_fit="contain",
             )
 
         with gr.Column(scale=1):
-            answer_box = gr.Textbox(
-                label="Generated answer",
-                lines=8,
-                interactive=False,
-            )
+            badge_box = gr.HTML(label="Evidence-support rate")
+            answer_box = gr.HTML(label="Generated answer")
             claims_box = gr.HTML(label="Claim verification")
-            badge_box = gr.HTML(label="Evidence-support score")
 
     submit_btn.click(
         fn=run_pipeline,
