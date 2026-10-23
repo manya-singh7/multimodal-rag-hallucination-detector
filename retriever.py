@@ -42,6 +42,15 @@ BROAD_SEMANTIC_WEIGHT = 0.45
 BROAD_KEYWORD_WEIGHT = 0.15
 BROAD_ROLE_WEIGHT = 0.40
 
+# Minimum score cutoff for retrieved results
+MIN_SCORE = 0.20
+
+# Reference / bibliography page ranges to skip per document source
+BIBLIOGRAPHY_PAGES: dict[str, range] = {
+    "paper1.pdf": range(27, 34),
+    "paper2.pdf": range(10, 13),
+}
+
 MIN_CHUNK_WORDS = 12      # chunks shorter than this are dropped (page numbers etc.)
 SHORT_CHUNK_WORDS = 25    # chunks shorter than this are penalised
 MAX_PER_PAGE = 2          # max chunks from one (paper, page) in the results
@@ -130,6 +139,16 @@ def is_noise(text: str) -> bool:
     return is_reference_list(text)
 
 
+def is_bibliography_chunk(source: str | None, page: int | None) -> bool:
+    """True if chunk falls into known bibliography/reference page ranges."""
+    if not source or page is None:
+        return False
+    source_name = Path(source).name
+    stem = Path(source).stem
+    pages = BIBLIOGRAPHY_PAGES.get(source_name) or BIBLIOGRAPHY_PAGES.get(stem)
+    return pages is not None and page in pages
+
+
 # ------------------------------------------------------------ tokenizing ----
 
 _SUFFIXES = ("ations", "ation", "ings", "ing", "ies", "ed", "es", "s")
@@ -186,7 +205,6 @@ def load_documents() -> list[dict]:
                 continue
             if is_noise(text) or text in seen_texts:
                 continue
-            seen_texts.add(text)
 
             page = chunk.get("page")
             try:
@@ -194,10 +212,16 @@ def load_documents() -> list[dict]:
             except (TypeError, ValueError):
                 page = None
 
+            source = chunk.get("source", json_path.stem + ".pdf")
+            if is_bibliography_chunk(source, page):
+                continue
+
+            seen_texts.add(text)
+
             documents.append({
                 "id": chunk.get("id", f"{json_path.stem}_{position}"),
                 "text": text,
-                "source": chunk.get("source", json_path.stem + ".pdf"),
+                "source": source,
                 "page": page,
                 "image_path": None,
             })
@@ -356,7 +380,12 @@ def _get_index(documents: list[dict] | None) -> _Index | None:
     """Build (and cache) the index for the processed corpus."""
     global _DEFAULT_INDEX
     if documents is not None:
-        docs = [d for d in documents if isinstance(d, dict) and d.get("text")]
+        docs = [
+            d for d in documents
+            if isinstance(d, dict)
+            and d.get("text")
+            and not is_bibliography_chunk(d.get("source"), d.get("page"))
+        ]
         return _Index(docs) if docs else None
     if _DEFAULT_INDEX is None:
         docs = load_documents()
@@ -581,8 +610,6 @@ def retrieve(
             bonus += w_role * role_score(doc["text"], doc.get("page"))
 
         score = w_sem * float(semantic[i]) + w_kw * float(keyword[i]) + bonus
-        if score <= 0:
-            continue
 
         scored.append({
             **doc,
@@ -592,7 +619,18 @@ def retrieve(
             "section_bonus": bonus,
         })
 
-    results = _select(scored, top_k, broad, allowed)
+    if scored:
+        best_doc = max(scored, key=lambda item: item["score"])
+        above_min = [d for d in scored if d["score"] >= MIN_SCORE]
+        if above_min:
+            results = _select(above_min, top_k, broad, allowed)
+            results = [r for r in results if r["score"] >= MIN_SCORE]
+            if not results:
+                results = [best_doc]
+        else:
+            results = [best_doc]
+    else:
+        results = []
 
     return {
         "text_chunks": [item["text"] for item in results],
