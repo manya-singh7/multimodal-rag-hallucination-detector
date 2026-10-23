@@ -2,9 +2,24 @@
 
 A multimodal retrieval-augmented generation (RAG) system with an evidence-grounded claim verification layer. The system answers user questions using retrieved text passages and figures from research papers, then verifies the generated answer against both text and image evidence to detect hallucinations.
 
-## Live Demo
+## Run Locally
 
-Demo link: (add your public demo link here once launched)
+1. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+
+2. Configure your Gemini API key in a `.env` file:
+   ```bash
+   GEMINI_API_KEY=your_gemini_api_key_here
+   ```
+
+3. Launch the Gradio demo:
+   ```bash
+   python demo_ui.py
+   ```
+
+The UI highlights each verified claim inline in green for Supported claims and red for Contradicted or Unsupported claims. It also displays an overall categorical trust badge: green (Verified, 100% supported with 0 contradictions), yellow (Partially Supported, between 0% and 100% supported with 0 contradictions), red (Unsupported / Contradicted, if any claim is contradicted or unsupported), or grey (No verifiable claims, when there are no claims to check).
 
 ## Overview
 
@@ -62,8 +77,8 @@ The codebase is organized by pipeline category:
 3. Configure your Gemini API key:
    Create a .env file in the repository root (never committed to git):
    GEMINI_API_KEY=your_gemini_api_key_here
-   Optionally specify a model (defaults to gemini-3.8-flash):
-   GEMINI_MODEL=gemini-3.8-flash
+   Optionally specify a model (defaults to gemini-3.1-flash-lite):
+   GEMINI_MODEL=gemini-3.1-flash-lite
 
 4. Run tests offline without an API key:
    pytest
