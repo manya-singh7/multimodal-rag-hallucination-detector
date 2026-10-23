@@ -13,6 +13,7 @@ import csv
 import json
 import re
 import sys
+import time
 from pathlib import Path
 
 import matplotlib
@@ -306,6 +307,12 @@ def main():
         help="Run offline using a fake VLM without requiring an API key or GPU.",
     )
     parser.add_argument(
+        "--delay",
+        type=float,
+        default=5.0,
+        help="Delay in seconds between queries to avoid rate limits (default: 5.0).",
+    )
+    parser.add_argument(
         "--output-chart",
         type=str,
         default="trust_chart.png",
@@ -351,6 +358,9 @@ def main():
                 "n_contradicted": 0,
                 "status": f"Error: {exc}",
             })
+
+        if not args.dry_run and idx < len(queries) and args.delay > 0:
+            time.sleep(args.delay)
 
     output_chart_path = base_dir / args.output_chart
     output_csv_path = base_dir / args.output_csv

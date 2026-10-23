@@ -1,0 +1,9 @@
+gradio
+google-genai
+python-dotenv
+sentence-transformers
+pymupdf
+pillow
+matplotlib
+pytest
+numpy
