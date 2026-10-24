@@ -12,8 +12,15 @@ ALLOWED_VERDICTS = {
     "Insufficient Evidence",
 }
 
+# Verdict for a claim whose check itself failed (API error, unreadable reply).
+# It is NOT something the model may answer. Such claims are left out of the
+# trust score and counted in "failed_claims".
+FAILED_VERDICT = "Verification Failed"
+
 # Cap on images sent to the model per answer (keeps latency and cost bounded).
-MAX_IMAGES = 3
+# Images are checked in the order given. demo_ui.py passes them in retrieval
+# rank order, so the best-ranked images are the ones that are kept.
+MAX_IMAGES = 2
 
 # Abbreviations whose trailing period must not end a sentence. Matching is
 # case-sensitive so units such as "ms." or the word "no." are not affected.
@@ -27,6 +34,91 @@ _ABBREVIATION_RE = re.compile(
 )
 _PROTECTED_DOT = ""
 
+# Source labels from the generator's prompt that models often echo back,
+# for example "[Text 1 | source: paper1.pdf]", "(Image 2)" or "(Source: x)".
+_CITATION_MARKER_RES = (
+    re.compile(
+        r"\s*[\[(]\s*(?:text|evidence|image|source)s?\s*\d+[^\])]*[\])]",
+        re.IGNORECASE,
+    ),
+    re.compile(r"\s*\(\s*sources?\s*:[^)]*\)", re.IGNORECASE),
+    re.compile(r"\s*\[\d+(?:\s*[,–-]\s*\d+)*\]"),
+)
+
+# "Answer:", "Summary:" and similar label prefixes are not part of a claim.
+_LABEL_PREFIX_RE = re.compile(
+    r"^\s*(?:final\s+)?(?:answer|summary|response|conclusion)\s*:\s*",
+    re.IGNORECASE,
+)
+
+# Sentence boundary: ., ! or ? (optionally followed by a closing quote or
+# bracket), whitespace, then a capital letter (optionally after an opening
+# quote or bracket).
+_SENTENCE_BOUNDARY_RE = re.compile(
+    "(?:(?<=[.!?])|(?<=[.!?][\"”’)\\]]))\\s+(?=[\"“‘(\\[]?[A-Z])"
+)
+
+# ---------------------------------------------------------------------------
+# Meta-sentences: statements about the evidence itself, not about the topic.
+# ("The evidence is insufficient.", "I don't know.") They are not claims, so
+# they are not verified or scored.
+# ---------------------------------------------------------------------------
+_EVIDENCE_NOUN = (
+    r"(?:(?:retrieved|provided|given|available|supplied)\s+)?"
+    r"(?:evidence|context|sources?|documents?|passages?|chunks?|excerpts?)"
+    r"|(?:retrieved|provided|given|available|supplied)\s+"
+    r"(?:text|information|material)"
+    r"|(?:text|information)\s+(?:provided|given|retrieved|available)"
+)
+_META_SUBJECT = (
+    r"^(?:based\s+on\s+[^,]{1,60},\s*)?(?:the\s+|these\s+|this\s+)?"
+    r"(?:" + _EVIDENCE_NOUN + r")"
+)
+_META_PATTERNS = tuple(
+    re.compile(pattern)
+    for pattern in (
+        # "The evidence is insufficient (to answer ...)."
+        _META_SUBJECT
+        + r"\s+(?:is|are|was|were|seems?|appears?)\s+(?:\w+\s+)?"
+        r"(?:insufficient|inadequate|incomplete|"
+        r"not\s+(?:sufficient|enough|adequate))\b",
+        # "The context does not mention/contain/specify ..."
+        _META_SUBJECT
+        + r"\s+(?:does|do|did)\s+not\s+(?:contain|include|mention|provide|"
+        r"specify|state|say|discuss|address|cover|offer|give|describe)\b",
+        # "There is no information about ..." / "Not enough evidence ..."
+        r"^(?:there\s+(?:is|are)\s+)?(?:no|not\s+enough|insufficient)\s+"
+        r"(?:relevant\s+|sufficient\s+)?(?:information|evidence|context|data)\b",
+        # "I don't know." / "I cannot answer ..." / "I am unable to ..."
+        r"^i\s+(?:do\s+not|don't|cannot|can't|could\s+not|couldn't|"
+        r"am\s+unable\s+to|am\s+not\s+able\s+to)\b",
+        # "... cannot be determined from the provided context."
+        r"\b(?:cannot|can't|could\s+not|not)\s+be\s+"
+        r"(?:found|determined|answered|concluded|inferred)\s+"
+        r"(?:in|from|using|based\s+on)\s+(?:the\s+)?(?:" + _EVIDENCE_NOUN + r")",
+    )
+)
+_META_LEAD_RE = re.compile(
+    r"^(?:unfortunately|sorry|however|note\s+that|please\s+note\s+that|"
+    r"overall|in\s+summary),?\s+"
+)
+# A sentence that goes on to say something real ("... but the method improves
+# recall") is kept, so the real part still gets verified.
+_CONTRAST_RE = re.compile(
+    r"\b(?:but|however|although|though|yet|whereas|while)\b"
+)
+
+
+def _is_meta_claim(claim: str) -> bool:
+    """True for a sentence that only comments on the evidence or refuses."""
+    text = claim.strip().strip("\"'“”‘’").lower()
+    text = _META_LEAD_RE.sub("", text)
+
+    if _CONTRAST_RE.search(text):
+        return False
+
+    return any(pattern.search(text) for pattern in _META_PATTERNS)
+
 
 def _protect_abbreviations(text: str) -> str:
     return _ABBREVIATION_RE.sub(lambda m: m.group(1) + _PROTECTED_DOT, text)
@@ -37,7 +129,12 @@ def _restore_abbreviations(text: str) -> str:
 
 
 def split_claims(answer: str) -> list[str]:
-    """Split an answer into claims without corrupting numbers or currency."""
+    """Split an answer into claims without corrupting numbers or currency.
+
+    Not claims, and so dropped: source labels the model echoed back, "Answer:"
+    style prefixes, intro lines that end with a colon and have nothing under
+    them, one-word fragments, and meta-sentences about the evidence itself.
+    """
     if not answer or not answer.strip():
         return []
 
@@ -52,6 +149,10 @@ def split_claims(answer: str) -> list[str]:
     answer = re.sub(r"\*\*(.*?)\*\*", r"\1", answer)
     answer = re.sub(r"__(.*?)__", r"\1", answer)
     answer = re.sub(r"`([^`]*)`", r"\1", answer)
+
+    # Remove echoed source labels such as "[Text 1 | source: paper1.pdf]".
+    for marker_re in _CITATION_MARKER_RES:
+        answer = marker_re.sub("", answer)
 
     claims = []
     current = []
@@ -69,6 +170,12 @@ def split_claims(answer: str) -> list[str]:
             if item.strip()
         ]
 
+        current = []
+
+        # An intro such as "The key points are:" with nothing under it.
+        if not bullets and heading.endswith(":"):
+            return
+
         if bullets:
             claim = heading.rstrip(":") + ": " + "; ".join(bullets)
         else:
@@ -79,14 +186,15 @@ def split_claims(answer: str) -> list[str]:
         if re.search(r"[A-Za-z]{2,}", claim):
             claims.append(claim)
 
-        current = []
-
     for raw in answer.splitlines():
         if not raw.strip():
             continue
 
         indent = len(raw) - len(raw.lstrip())
-        text = raw.strip()
+        text = _LABEL_PREFIX_RE.sub("", raw.strip()).strip()
+
+        if not text:
+            continue
 
         if re.fullmatch(r"\d+[.)]", text):
             continue
@@ -110,15 +218,18 @@ def split_claims(answer: str) -> list[str]:
         elif current and indent > 0:
             current.append(text)
 
+        elif text.endswith(":"):
+            # A heading such as "Key results:" opens a list. Bullets under it
+            # are joined to it; with nothing under it, flush() drops it.
+            flush()
+            current = [text]
+
         else:
             flush()
 
             # Abbreviations such as "et al.", "Fig." and "e.g." are protected
             # so a citation does not break a sentence into fragments.
-            parts = re.split(
-                r"(?<=[.!?])\s+(?=[A-Z])",
-                _protect_abbreviations(text),
-            )
+            parts = _SENTENCE_BOUNDARY_RE.split(_protect_abbreviations(text))
             claims.extend(
                 _restore_abbreviations(part).strip()
                 for part in parts
@@ -127,11 +238,16 @@ def split_claims(answer: str) -> list[str]:
 
     flush()
 
-    # Deduplicate while preserving order.
+    # Drop fragments and meta-sentences, then deduplicate in order.
     result = []
     seen = set()
 
     for claim in claims:
+        claim = claim.strip()
+
+        if len(claim.split()) < 2 or _is_meta_claim(claim):
+            continue
+
         key = re.sub(r"\s+", " ", claim).casefold()
 
         if key and key not in seen:
@@ -164,13 +280,19 @@ def _quote_exists(quote: str, evidence_texts: list[str]) -> bool:
 
 
 def _build_result(verified: list[dict]) -> dict:
-    """Assemble the final result in the agreed output schema."""
+    """Assemble the final result in the agreed output schema.
+
+    Claims whose check failed are not scored: the trust score is the share of
+    Supported claims among the claims that were actually checked.
+    """
     total = len(verified)
     supported = sum(item["verdict"] == "Supported" for item in verified)
     contradicted = sum(item["verdict"] == "Contradicted" for item in verified)
+    failed = sum(item["verdict"] == FAILED_VERDICT for item in verified)
+    scored = total - failed
 
-    # Percentage of claims labeled Supported; not factual accuracy probability.
-    trust_score = round(100 * supported / total) if total else 0
+    # Percentage of checked claims labeled Supported; not factual accuracy.
+    trust_score = round(100 * supported / scored) if scored else 0
 
     return {
         "claims": verified,
@@ -178,6 +300,7 @@ def _build_result(verified: list[dict]) -> dict:
         "total_claims": total,
         "supported_claims": supported,
         "n_contradicted": contradicted,
+        "failed_claims": failed,
     }
 
 
@@ -192,6 +315,19 @@ def _insufficient(claims: list[str], explanation: str) -> list[dict]:
         }
         for claim in claims
     ]
+
+
+def _failed(claim: str, reason: str) -> dict:
+    """A claim whose check could not be completed (not a judgment on it)."""
+    return {
+        "claim": claim,
+        "verdict": FAILED_VERDICT,
+        "evidence": [],
+        "modality": "none",
+        "explanation": (
+            f"Verification failed: {reason}. This claim was not scored."
+        ),
+    }
 
 
 def _parse_json_claims(response) -> list:
@@ -293,10 +429,8 @@ Required JSON:
         model_results = _parse_json_claims(call_vlm(prompt))
 
     except Exception as exc:
-        return _insufficient(
-            claims,
-            "Verification failed: " + type(exc).__name__,
-        )
+        # The check itself failed (API error, timeout, unreadable reply).
+        return [_failed(claim, type(exc).__name__) for claim in claims]
 
     verified = []
 
@@ -305,13 +439,17 @@ Required JSON:
             model_results[index]
             if index < len(model_results)
             and isinstance(model_results[index], dict)
-            else {}
+            else None
         )
 
-        verdict = item.get("verdict", "Insufficient Evidence")
+        # The model skipped this claim or gave a verdict that is not allowed.
+        if item is None or item.get("verdict") not in ALLOWED_VERDICTS:
+            verified.append(
+                _failed(claim, "the model returned no valid verdict")
+            )
+            continue
 
-        if verdict not in ALLOWED_VERDICTS:
-            verdict = "Insufficient Evidence"
+        verdict = item["verdict"]
 
         raw_quotes = item.get("evidence", [])
 
@@ -356,7 +494,7 @@ Required JSON:
 # ---------------------------------------------------------------------------
 
 def _prepare_images(images: list) -> list[dict]:
-    """Keep up to MAX_IMAGES images whose files actually exist.
+    """Keep up to MAX_IMAGES images whose files actually exist, in order.
 
     Accepts the agreed {path, caption, source_doc} dicts (captions are never
     read) or plain path strings. Missing files are skipped so the model is
@@ -480,6 +618,7 @@ def _merge_with_images(text_item: dict, findings: list[tuple]) -> dict:
     findings: (label, verdict, description) per checked image.
     Contradiction override: if any image shows the opposite of the claim, the
     verdict is Contradicted even when the retrieved text supports the claim.
+    A claim whose text check failed can still be settled by an image.
     """
     text_verdict = text_item["verdict"]
     contradicting = [f for f in findings if f[1] == "Contradicted"]
@@ -548,9 +687,12 @@ def verify_claims(
 ) -> dict:
     """Verify answer claims against retrieved text and, optionally, images.
 
-    Text is checked first. If images are given, each (up to MAX_IMAGES) is then
-    checked on its pixels only, and an image that shows the opposite of a claim
-    overrides the text verdict with "Contradicted".
+    Text is checked first. If images are given, each (up to MAX_IMAGES, in the
+    order given) is then checked on its pixels only, and an image that shows
+    the opposite of a claim overrides the text verdict with "Contradicted".
+
+    A claim whose check fails gets the verdict "Verification Failed" and is
+    left out of trust_score (see "failed_claims" in the result).
     """
 
     claims = split_claims(answer)

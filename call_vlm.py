@@ -16,8 +16,28 @@ MAX_ATTEMPTS = 4
 INITIAL_RETRY_DELAY = 2
 
 
+# Network errors that are worth retrying even when their message is empty
+# (for example httpx.ReadError). Subclasses are matched by name too.
+RETRYABLE_ERROR_TYPES = {
+    "readerror",
+    "readtimeout",
+    "writetimeout",
+    "connecttimeout",
+    "pooltimeout",
+    "connecterror",
+    "remoteprotocolerror",
+    "timeoutexception",
+    "timeouterror",
+}
+
+
 def _is_retryable_error(error: Exception) -> bool:
     """Identify temporary API or network errors worth retrying."""
+    error_types = {cls.__name__.lower() for cls in type(error).__mro__}
+
+    if error_types & RETRYABLE_ERROR_TYPES:
+        return True
+
     message = str(error).lower()
 
     retryable_indicators = (
@@ -72,6 +92,7 @@ def call_vlm(prompt: str, images: list = None) -> str:
             response = client.models.generate_content(
                 model=MODEL_ID,
                 contents=contents,
+                config={"temperature": 0},  # repeatable answers and verdicts
             )
 
             if not response.text:
