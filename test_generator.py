@@ -344,6 +344,7 @@ def test_offline_multimodal_integration(monkeypatch):
         "total_claims",
         "supported_claims",
         "n_contradicted",
+        "failed_claims",
     }
     assert set(ver_result_with_images.keys()) == expected_schema_keys
     expected_claim_keys = {
