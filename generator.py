@@ -54,6 +54,8 @@ def _build_prompt(query, text_chunks, images):
         "If the evidence is insufficient, say so clearly.",
         "Do not invent facts or claim that an image shows something "
         "unless you can actually verify it.",
+        "Answer in 2 or 3 short sentences, one fact per sentence, "
+        "and do not list every item from a figure or table; mention only what the question asks.",
         "",
         "TEXT EVIDENCE:",
     ]
