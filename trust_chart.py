@@ -192,6 +192,7 @@ def evaluate_query(query: str, query_id: str) -> dict:
     total_claims = ver_result.get("total_claims", 0)
     supported_claims = ver_result.get("supported_claims", 0)
     n_contradicted = ver_result.get("n_contradicted", 0)
+    failed_claims = ver_result.get("failed_claims", 0)
 
     return {
         "query_id": query_id,
@@ -201,6 +202,7 @@ def evaluate_query(query: str, query_id: str) -> dict:
         "total_claims": total_claims,
         "supported_claims": supported_claims,
         "n_contradicted": n_contradicted,
+        "failed_claims": failed_claims,
         "status": "Success",
     }
 
@@ -261,6 +263,7 @@ def save_csv_results(results: list[dict], output_path: Path):
         "total_claims",
         "supported_claims",
         "n_contradicted",
+        "failed_claims",
         "status",
         "answer",
     ]
@@ -277,15 +280,15 @@ def print_summary(results: list[dict]):
     print("\n" + "=" * 90)
     print("EVALUATION SUMMARY: TRUST SCORE ACROSS TEST QUERIES")
     print("=" * 90)
-    header = f"{'ID':<4} {'Trust (%)':<11} {'Supported':<11} {'Contradicted':<14} {'Total Claims':<14} {'Query':<32}"
+    header = f"{'ID':<4} {'Trust (%)':<11} {'Supported':<11} {'Contradicted':<14} {'Failed':<9} {'Total':<8} {'Query':<30}"
     print(header)
     print("-" * 90)
     for r in results:
-        q_text = r["query"] if len(r["query"]) <= 32 else r["query"][:29] + "..."
+        q_text = r["query"] if len(r["query"]) <= 30 else r["query"][:27] + "..."
         score_text = f"{r['trust_score']}%"
         print(
             f"{r['query_id']:<4} {score_text:<11} {r['supported_claims']:<11} "
-            f"{r['n_contradicted']:<14} {r['total_claims']:<14} {q_text:<32}"
+            f"{r['n_contradicted']:<14} {r.get('failed_claims', 0):<9} {r['total_claims']:<8} {q_text:<30}"
         )
     print("=" * 90 + "\n")
 
@@ -356,6 +359,7 @@ def main():
                 "total_claims": 0,
                 "supported_claims": 0,
                 "n_contradicted": 0,
+                "failed_claims": 0,
                 "status": f"Error: {exc}",
             })
 
