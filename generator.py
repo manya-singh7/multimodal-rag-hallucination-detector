@@ -59,15 +59,23 @@ def _build_prompt(query, text_chunks, images):
     ]
 
     for i, chunk in enumerate(text_chunks, 1):
-        source = chunk.get("source", "Unknown")
-        page = chunk.get("page", "Unknown")
+        if isinstance(chunk, dict):
+            source = chunk.get("source", "Unknown")
+            page = chunk.get("page", "Unknown")
+            text = chunk.get("text", "")
+        else:
+            source = "Unknown"
+            page = "Unknown"
+            text = str(chunk)
         lines.append(
             f"[Evidence {i} | Source: {source} | Page: {page}]\n"
-            f"{chunk.get('text', '')}"
+            f"{text}"
         )
 
-    lines.extend(["", "Relevant images are attached separately.",
-                  f"Question: {query}", "Answer:"])
+    lines.append("")
+    if images:
+        lines.append("Relevant images are attached separately.")
+    lines.extend([f"Question: {query}", "Answer:"])
 
     return "\n\n".join(lines)
 
@@ -107,8 +115,10 @@ def _find_supporting_sentence(answer, text_chunks):
 
 def generate_answer(query, retrieved):
     # retriever.py returns result dictionaries and image_paths.
-    text_chunks = retrieved.get("results") or []
-    image_paths = retrieved.get("image_paths") or []
+    text_chunks = retrieved.get("results") or retrieved.get("text_chunks") or []
+    image_paths = retrieved.get("image_paths") or [
+        img["path"] for img in retrieved.get("images", []) if isinstance(img, dict) and "path" in img
+    ] or []
 
     if not text_chunks and not image_paths:
         return {
@@ -121,14 +131,19 @@ def generate_answer(query, retrieved):
     prompt = _build_prompt(query, text_chunks, image_paths)
     answer = call_vlm(prompt, images=image_paths or None)
 
+    used_images = []
+    for path in image_paths:
+        p = path.get("path") if isinstance(path, dict) else str(path)
+        used_images.append({
+            "path": p,
+            "source_doc": Path(p).name,
+        })
+
     return {
         "answer": answer.strip(),
         "supporting_sentence": _find_supporting_sentence(
             answer, text_chunks
         ),
         "used_text": text_chunks,
-        "used_images": [
-            {"path": path, "source_doc": Path(path).name}
-            for path in image_paths
-        ],
+        "used_images": used_images,
     }

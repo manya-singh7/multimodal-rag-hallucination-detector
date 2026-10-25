@@ -368,6 +368,29 @@ def test_offline_multimodal_integration(monkeypatch):
     assert ver_result_without_images["trust_score"] == 100
 
 
+
+def test_string_chunks_and_text_chunks_key(monkeypatch):
+    """Verify that string chunks and retrieved dicts with text_chunks work without error."""
+    recorded_prompts = []
+
+    def mock_vlm(prompt, images=None):
+        recorded_prompts.append(prompt)
+        return "Quantum states can exist in superposition."
+
+    monkeypatch.setattr(generator, "call_vlm", mock_vlm)
+
+    # Calling with text_chunks as strings and no images
+    retrieved = {
+        "text_chunks": [
+            "Quantum states can exist in superposition and entanglement simultaneously."
+        ],
+    }
+    res = generate_answer("What is quantum superposition?", retrieved)
+    assert res["answer"] == "Quantum states can exist in superposition."
+    assert "Relevant images are attached separately." not in recorded_prompts[0]
+    assert "[Evidence 1 | Source: Unknown | Page: Unknown]" in recorded_prompts[0]
+
+
 # ---------------- Live Test ----------------
 
 
