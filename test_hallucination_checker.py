@@ -353,6 +353,19 @@ def test_real_sentences_that_look_similar_are_kept():
         assert verifier.split_claims(sentence) == [sentence], sentence
 
 
+def test_meta_sentences_with_connectives_and_real_claims():
+    assert verifier.split_claims("Therefore, the evidence is insufficient to answer this question.") == []
+    assert verifier.split_claims("Thus, the provided text does not mention this.") == []
+    assert verifier.split_claims("Consequently, the evidence is insufficient.") == []
+
+    assert verifier.split_claims("Therefore, the method improves recall by 12 percent.") == [
+        "Therefore, the method improves recall by 12 percent."
+    ]
+    assert verifier.split_claims("Thus, revenue declined every year.") == [
+        "Thus, revenue declined every year."
+    ]
+
+
 # ---------------- a claim about the image is judged by the image ----------------
 def test_claim_about_the_image_is_supported_when_only_the_text_disagrees(monkeypatch):
     claim = "The provided image shows a consistent decline in revenue."

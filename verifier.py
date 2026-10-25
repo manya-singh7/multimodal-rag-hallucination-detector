@@ -105,7 +105,8 @@ _META_PATTERNS = tuple(
 )
 _META_LEAD_RE = re.compile(
     r"^(?:unfortunately|sorry|however|note\s+that|please\s+note\s+that|"
-    r"overall|in\s+summary),?\s+"
+    r"overall|in\s+summary|therefore|thus|hence|so|consequently|accordingly|"
+    r"as\s+a\s+result|in\s+conclusion|in\s+short),?\s+"
 )
 # A sentence that goes on to say something real ("... but the method improves
 # recall") is kept, so the real part still gets verified.
