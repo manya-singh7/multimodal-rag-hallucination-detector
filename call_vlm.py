@@ -1,3 +1,4 @@
+"""Gemini VLM wrapper with exponential backoff and model fallback."""
 
 import os
 import time
@@ -13,6 +14,7 @@ API_KEY = os.getenv("GEMINI_API_KEY")
 MODEL_ID = os.getenv("GEMINI_MODEL", "gemini-3.1-flash-lite")
 
 MAX_ATTEMPTS = 4
+FALLBACK_ATTEMPTS = 2
 INITIAL_RETRY_DELAY = 2
 
 
@@ -61,8 +63,23 @@ def _is_retryable_error(error: Exception) -> bool:
     return any(indicator in message for indicator in retryable_indicators)
 
 
+def _parse_fallback_models(primary_model: str | None = None) -> list[str]:
+    """Parse comma-separated GEMINI_FALLBACK_MODELS, dropping empty, duplicates, and primary."""
+    if primary_model is None:
+        primary_model = os.getenv("GEMINI_MODEL", MODEL_ID).strip()
+    raw = os.getenv("GEMINI_FALLBACK_MODELS", "gemini-3.6-flash,gemini-3.8-flash")
+    fallbacks = []
+    seen = {primary_model}
+    for item in raw.split(","):
+        name = item.strip()
+        if name and name not in seen:
+            seen.add(name)
+            fallbacks.append(name)
+    return fallbacks
+
+
 def call_vlm(prompt: str, images: list = None) -> str:
-    """Generate a response using Gemini, retrying temporary failures."""
+    """Generate a response using Gemini, retrying temporary failures and falling back to backup models."""
 
     if not API_KEY or API_KEY == "put_your_api_key_here":
         raise RuntimeError(
@@ -87,45 +104,63 @@ def call_vlm(prompt: str, images: list = None) -> str:
                 f"Could not load image '{path.name}': {exc}"
             ) from exc
 
-    for attempt in range(1, MAX_ATTEMPTS + 1):
-        try:
-            response = client.models.generate_content(
-                model=MODEL_ID,
-                contents=contents,
-                config={"temperature": 0},  # repeatable answers and verdicts
-            )
+    primary_model = os.getenv("GEMINI_MODEL", MODEL_ID).strip()
+    fallback_models = _parse_fallback_models(primary_model)
+    models_to_try = [primary_model] + fallback_models
 
-            if not response.text:
-                raise RuntimeError(
-                    "Gemini returned an empty text response."
+    models_tried = []
+    last_error = None
+
+    for model_index, model in enumerate(models_to_try):
+        is_primary = (model_index == 0)
+        max_attempts = MAX_ATTEMPTS if is_primary else FALLBACK_ATTEMPTS
+        models_tried.append(model)
+
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = client.models.generate_content(
+                    model=model,
+                    contents=contents,
+                    config={"temperature": 0},  # repeatable answers and verdicts
                 )
 
-            return response.text.strip()
-
-        except Exception as exc:
-            should_retry = _is_retryable_error(exc)
-            final_attempt = attempt == MAX_ATTEMPTS
-
-            if not should_retry or final_attempt:
-                if should_retry:
+                if not response.text:
                     raise RuntimeError(
-                        f"Gemini remained unavailable after "
-                        f"{MAX_ATTEMPTS} attempts. "
-                        f"Model: {MODEL_ID}. "
-                        f"Please try again later. "
-                        f"Last error: {exc}"
-                    ) from exc
+                        "Gemini returned an empty text response."
+                    )
 
-                raise
+                return response.text.strip()
 
-            delay = INITIAL_RETRY_DELAY * (2 ** (attempt - 1))
+            except Exception as exc:
+                should_retry = _is_retryable_error(exc)
+                last_error = exc
 
-            print(
-                f"[RETRY] Gemini request failed "
-                f"({attempt}/{MAX_ATTEMPTS}): {exc}"
-            )
-            print(f"[RETRY] Trying again in {delay} seconds...")
+                if not should_retry:
+                    raise
 
-            time.sleep(delay)
+                final_attempt = (attempt == max_attempts)
 
-    raise RuntimeError("Gemini request failed unexpectedly.")
+                if not final_attempt:
+                    delay = INITIAL_RETRY_DELAY * (2 ** (attempt - 1))
+
+                    print(
+                        f"[RETRY] Gemini request failed "
+                        f"({attempt}/{max_attempts}): {exc}"
+                    )
+                    print(f"[RETRY] Trying again in {delay} seconds...")
+
+                    time.sleep(delay)
+                else:
+                    if model_index + 1 < len(models_to_try):
+                        next_model = models_to_try[model_index + 1]
+                        print(
+                            f"Gemini model {model} unavailable, trying {next_model}"
+                        )
+                    break
+
+    tried_str = ", ".join(models_tried)
+    raise RuntimeError(
+        f"Gemini remained unavailable after trying models: {tried_str}. "
+        f"Please try again later. "
+        f"Last error: {last_error}"
+    ) from last_error
