@@ -453,6 +453,9 @@ def run_pipeline(query: str):
                 flush=True,
             )
 
+            if check.get("total_claims", 0) == 0:
+                gallery_items = []
+
             claims_display = claims_html(check)
             badge = status_badge(check)
             answer_display = (
