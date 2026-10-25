@@ -517,6 +517,8 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
         query_box = gr.Textbox(
             label="Question",
             placeholder="Ask a question about the research corpus...",
+            lines=1,
+            max_lines=1,
             scale=4,
         )
         submit_btn = gr.Button("Run", variant="primary", scale=1)
@@ -542,16 +544,25 @@ with gr.Blocks(title="Multimodal RAG Hallucination Detector") as demo:
             answer_box = gr.HTML(label="Generated answer")
             claims_box = gr.HTML(label="Claim verification")
 
+    pipeline_outputs = [
+        sources_box,
+        answer_box,
+        image_gallery,
+        claims_box,
+        badge_box,
+    ]
+
     submit_btn.click(
         fn=run_pipeline,
         inputs=query_box,
-        outputs=[
-            sources_box,
-            answer_box,
-            image_gallery,
-            claims_box,
-            badge_box,
-        ],
+        outputs=pipeline_outputs,
+    )
+
+    # Pressing Enter in the question box runs the same pipeline.
+    query_box.submit(
+        fn=run_pipeline,
+        inputs=query_box,
+        outputs=pipeline_outputs,
     )
 
     example_dropdown.change(
