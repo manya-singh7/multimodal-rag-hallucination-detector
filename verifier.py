@@ -66,9 +66,11 @@ _SENTENCE_BOUNDARY_RE = re.compile(
 _EVIDENCE_NOUN = (
     r"(?:(?:retrieved|provided|given|available|supplied)\s+)?"
     r"(?:evidence|context|sources?|documents?|passages?|chunks?|excerpts?)"
+    r"(?:\s+(?:provided|given|retrieved|available|supplied))?"
     r"|(?:retrieved|provided|given|available|supplied)\s+"
-    r"(?:text|information|material)"
+    r"(?:text|information|material|images?|figures?|charts?|diagrams?)"
     r"|(?:text|information)\s+(?:provided|given|retrieved|available)"
+    r"|(?:text|texts)\s+and\s+(?:the\s+)?(?:images?|figures?)"
 )
 _META_SUBJECT = (
     r"^(?:based\s+on\s+[^,]{1,60},\s*)?(?:the\s+|these\s+|this\s+)?"
@@ -80,12 +82,15 @@ _META_PATTERNS = tuple(
         # "The evidence is insufficient (to answer ...)."
         _META_SUBJECT
         + r"\s+(?:is|are|was|were|seems?|appears?)\s+(?:\w+\s+)?"
-        r"(?:insufficient|inadequate|incomplete|"
-        r"not\s+(?:sufficient|enough|adequate))\b",
+        r"(?:insufficient|inadequate|incomplete|contradictory|conflicting|"
+        r"inconsistent|unclear|ambiguous|irrelevant|vague|"
+        r"not\s+(?:sufficient|enough|adequate|clear|relevant))\b",
         # "The context does not mention/contain/specify ..."
         _META_SUBJECT
         + r"\s+(?:does|do|did)\s+not\s+(?:contain|include|mention|provide|"
-        r"specify|state|say|discuss|address|cover|offer|give|describe)\b",
+        r"specify|state|say|discuss|address|cover|offer|give|describe|"
+        r"list|name|identify|define|explain|report|indicate|clarify|"
+        r"detail|reveal|show)\b",
         # "There is no information about ..." / "Not enough evidence ..."
         r"^(?:there\s+(?:is|are)\s+)?(?:no|not\s+enough|insufficient)\s+"
         r"(?:relevant\s+|sufficient\s+)?(?:information|evidence|context|data)\b",
@@ -612,6 +617,20 @@ def _check_image(claims: list[str], image: dict):
     return checked
 
 
+# A claim that is explicitly about what an image shows ("the image shows a
+# consistent decline") is judged by the image. The retrieved text cannot
+# refute a statement about how a picture looks.
+_IMAGE_SUBJECT_RE = re.compile(
+    r"\b(?:the\s+|this\s+|these\s+)?(?:(?:provided|given|retrieved|attached)\s+)?"
+    r"(?:images?|figures?|charts?|graphs?|diagrams?|plots?|pictures?|photos?)\b"
+    r"[^.]{0,40}?\b(?:shows?|depicts?|displays?|illustrates?|indicates?|reveals?)\b"
+)
+
+
+def _is_about_image(claim: str) -> bool:
+    return bool(_IMAGE_SUBJECT_RE.search(claim.lower()))
+
+
 def _merge_with_images(text_item: dict, findings: list[tuple]) -> dict:
     """Combine a text verdict with image findings for one claim.
 
@@ -651,11 +670,16 @@ def _merge_with_images(text_item: dict, findings: list[tuple]) -> dict:
             "explanation": explanation,
         }
 
-    if text_verdict == "Contradicted":
+    if text_verdict == "Contradicted" and not (
+        supporting and _is_about_image(text_item["claim"])
+    ):
         return text_item
 
     if supporting:
-        evidence = text_item["evidence"] + [describe(f) for f in supporting]
+        # When the text contradicted a claim about the image, the image alone
+        # settles it, so the contradicting text quote is not shown as support.
+        kept = [] if text_verdict == "Contradicted" else text_item["evidence"]
+        evidence = kept + [describe(f) for f in supporting]
 
         if text_verdict == "Supported":
             return {

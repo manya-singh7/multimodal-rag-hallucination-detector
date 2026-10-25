@@ -334,6 +334,45 @@ def test_an_answer_of_only_meta_sentences_makes_no_model_calls(monkeypatch):
     assert fake.calls == []
 
 
+def test_more_meta_sentences_are_not_claims():
+    for sentence in (
+        "The text and the image do not mention quantum computing.",
+        "The evidence provided is insufficient to answer the question.",
+        "The provided text does not list the specific domains.",
+        "The provided evidence is contradictory.",
+    ):
+        assert verifier.split_claims(sentence) == [], sentence
+
+
+def test_real_sentences_that_look_similar_are_kept():
+    for sentence in (
+        "The provided image shows a consistent decline.",
+        "The sources are limited to two papers.",
+        "The paper does not report accuracy.",
+    ):
+        assert verifier.split_claims(sentence) == [sentence], sentence
+
+
+# ---------------- a claim about the image is judged by the image ----------------
+def test_claim_about_the_image_is_supported_when_only_the_text_disagrees(monkeypatch):
+    claim = "The provided image shows a consistent decline in revenue."
+    fake = FakeVLM(text=text_reply("Contradicted", quote=GROWTH_TEXT),
+                   image=image_reply("Supported", "The line falls from 120 to 52."))
+    out = run(monkeypatch, fake, claim=claim, imgs=images(DECLINE))
+    item = out["claims"][0]
+    assert item["verdict"] == "Supported"
+    assert item["modality"] == "image"
+    assert GROWTH_TEXT not in item["evidence"]
+    assert out["trust_score"] == 100 and out["n_contradicted"] == 0
+
+
+def test_text_contradiction_still_wins_for_a_claim_not_about_the_image(monkeypatch):
+    fake = FakeVLM(text=text_reply("Contradicted", quote=GROWTH_TEXT),
+                   image=image_reply("Supported", "The line falls."))
+    out = run(monkeypatch, fake, claim="Revenue fell every year.", imgs=images(DECLINE))
+    assert out["claims"][0]["verdict"] == "Contradicted"
+
+
 # ---------------- call_vlm.py: retries and temperature ----------------
 class TimeoutException(Exception):
     pass
