@@ -338,7 +338,7 @@ def main():
         verifier.call_vlm = dry_vlm
 
     queries = load_queries(args.queries)
-    print(f"Running evaluation on {len(queries)} queries...")
+    print(f"Running evaluation on {len(queries)} queries...", flush=True)
 
     results = []
     base_dir = Path(__file__).resolve().parent
@@ -346,7 +346,7 @@ def main():
     for idx, query in enumerate(queries, 1):
         query_id = f"Q{idx}"
         try:
-            print(f"[{query_id}/{len(queries)}] Processing: '{query}'")
+            print(f"[{query_id}/{len(queries)}] Processing: '{query}'", flush=True)
             res = evaluate_query(query, query_id)
             results.append(res)
         except Exception as exc:
