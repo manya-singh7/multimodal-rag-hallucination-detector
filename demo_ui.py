@@ -70,6 +70,12 @@ UNSUPPORTED_STYLE = (
     "background-color:#f8d7da;color:#721c24;padding:2px 6px;"
     "border-radius:4px;margin:0 2px;"
 )
+# Claims whose check itself failed: neutral grey with a dashed border, so they
+# are never mistaken for a real "Contradicted / Unsupported" verdict.
+FAILED_STYLE = (
+    "background-color:#e2e3e5;color:#383d41;padding:2px 6px;"
+    "border-radius:4px;margin:0 2px;border:1px dashed #6c757d;"
+)
 
 _IMAGE_NAME_RE = re.compile(r"^(?P<doc>.+)_p(?P<page>\d+)_img")
 
@@ -79,6 +85,20 @@ MODALITY_LABELS = {
     "text+image": "retrieved text + image",
     "none": "no evidence found",
 }
+
+
+def _count(value) -> int:
+    """failed_claims may be a number or a list; return a plain count."""
+    if isinstance(value, (list, tuple)):
+        return len(value)
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _is_failed(verdict) -> bool:
+    return str(verdict).strip().lower() == "verification failed"
 
 
 def api_key_missing() -> bool:
@@ -195,9 +215,8 @@ def claims_html(check):
     cards = []
 
     for item in claims:
-        verdict = html.escape(
-            str(item.get("verdict", "Insufficient Evidence"))
-        )
+        raw_verdict = str(item.get("verdict", "Insufficient Evidence"))
+        verdict = html.escape(raw_verdict)
         claim = html.escape(str(item.get("claim", "")))
         explanation = html.escape(str(item.get("explanation", "")))
 
@@ -216,9 +235,20 @@ def claims_html(check):
         if not evidence_items:
             evidence_items = "<li>No validated evidence returned.</li>"
 
+        # Failed checks get a neutral dashed card instead of the normal one.
+        if _is_failed(raw_verdict):
+            card_style = (
+                "border:1px dashed #6c757d;background:#f1f2f3;"
+                "padding:10px;border-radius:8px;margin-bottom:8px"
+            )
+        else:
+            card_style = (
+                "border:1px solid #ccc;padding:10px;"
+                "border-radius:8px;margin-bottom:8px"
+            )
+
         cards.append(
-            "<div style='border:1px solid #ccc;padding:10px;"
-            "border-radius:8px;margin-bottom:8px'>"
+            f"<div style='{card_style}'>"
             f"<b>{verdict.upper()}</b>"
             f"<p><b>Claim:</b> {claim}</p>"
             f"<p><b>Checked against:</b> {modality_label}</p>"
@@ -231,20 +261,42 @@ def claims_html(check):
 
 
 def status_badge(check: dict) -> str:
-    """Feature #2: categorical status badge (thresholds from the project doc)."""
-    total = check.get("total_claims", 0)
+    """Feature #2: categorical status badge.
+
+    Part 5 thresholds, plus the "Verification Failed" handling agreed in
+    Part 9: claims whose check failed are not scored, and the badge never says
+    Verified or Partially Supported while something could not be checked.
+    Contradicted still wins (red), but the failed count is shown.
+    """
+    total = _count(check.get("total_claims", 0))
+    failed = _count(check.get("failed_claims", 0))
+    checked = max(total - failed, 0)
     score = check.get("trust_score", 0)
-    n_contradicted = check.get("n_contradicted", 0)
+    n_contradicted = _count(check.get("n_contradicted", 0))
+    supported = _count(check.get("supported_claims", 0))
 
     if total == 0:
         icon, label = "⚪", "No verifiable claims"
         bg, fg = "#e2e3e5", "#383d41"
         detail = "The answer contained no claims to check."
+    elif failed == total:
+        icon, label = "🟠", "Verification failed, try again"
+        bg, fg = "#ffe5d0", "#8a4b08"
+        detail = (
+            f"None of the {total} claims could be checked (API error or "
+            "unreadable reply). Run the question again."
+        )
     else:
-        if score == 100 and n_contradicted == 0:
+        if n_contradicted > 0:
+            icon, label = "🔴", "Unsupported / Contradicted"
+            bg, fg = "#f8d7da", "#721c24"
+        elif failed > 0:
+            icon, label = "🟠", "Verification incomplete, try again"
+            bg, fg = "#ffe5d0", "#8a4b08"
+        elif score == 100:
             icon, label = "🟢", "Verified"
             bg, fg = "#d4edda", "#155724"
-        elif 0 < score < 100 and n_contradicted == 0:
+        elif score > 0:
             icon, label = "🟡", "Partially Supported"
             bg, fg = "#fff3cd", "#856404"
         else:
@@ -253,9 +305,11 @@ def status_badge(check: dict) -> str:
 
         detail = (
             f"{score}% evidence-support rate "
-            f"({check.get('supported_claims', 0)}/{total} claims supported, "
+            f"({supported}/{checked} checked claims supported, "
             f"{n_contradicted} contradicted)"
         )
+        if failed:
+            detail += f". {failed} of {total} claims could not be checked."
 
     return (
         f"<div style='padding:14px;border-radius:10px;background:{bg};"
@@ -263,16 +317,18 @@ def status_badge(check: dict) -> str:
         f"<div style='font-size:1.2em'><b>{icon} {label}</b></div>"
         f"<div>{html.escape(detail)}</div>"
         "<div style='font-size:0.85em;margin-top:4px'>"
-        "The evidence-support rate is the percentage of claims classified as "
-        "Supported, not accuracy or a calibrated probability.</div></div>"
+        "The evidence-support rate is the percentage of checked claims "
+        "classified as Supported, not accuracy or a calibrated "
+        "probability.</div></div>"
     )
 
 
 def highlighted_answer(answer: str, claims: list[dict]) -> str:
-    """Feature #1: each verified claim wrapped in a green or red span.
+    """Feature #1: each verified claim wrapped in a green, red or grey span.
 
     Built from the verifier's claims (not by string-matching the raw answer),
     because the verifier normalizes text (strips Markdown, merges list items).
+    Claims that could not be checked are neutral grey, not red.
     If there are no claims (for example a refusal), the raw answer is shown.
     """
     if not claims:
@@ -281,7 +337,14 @@ def highlighted_answer(answer: str, claims: list[dict]) -> str:
     spans = []
     for item in claims:
         verdict = str(item.get("verdict", "Insufficient Evidence"))
-        style = SUPPORTED_STYLE if verdict == "Supported" else UNSUPPORTED_STYLE
+
+        if verdict == "Supported":
+            style = SUPPORTED_STYLE
+        elif _is_failed(verdict):
+            style = FAILED_STYLE
+        else:
+            style = UNSUPPORTED_STYLE
+
         spans.append(
             f'<span style="{style}" title="{html.escape(verdict)}">'
             f'{html.escape(str(item.get("claim", "")))}</span>'
@@ -293,7 +356,8 @@ def highlighted_answer(answer: str, claims: list[dict]) -> str:
         + "</div>"
         "<div style='font-size:0.85em;margin-top:8px'>"
         f"<span style='{SUPPORTED_STYLE}'>Supported</span> "
-        f"<span style='{UNSUPPORTED_STYLE}'>Contradicted / Unsupported</span>"
+        f"<span style='{UNSUPPORTED_STYLE}'>Contradicted / Unsupported</span> "
+        f"<span style='{FAILED_STYLE}'>Not checked</span>"
         "</div>"
     )
 
